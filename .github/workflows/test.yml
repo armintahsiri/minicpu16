@@ -1,16 +1,25 @@
-# MiniCPU-16 CI.
+# MiniCPU-16 CI (Phase 5A).
 #
-# This workflow has NOT been executed (there is no GitHub remote yet).  It is
-# committed as the intended runner definition and is explicitly unverified.
+# This workflow has NOT been executed on GitHub.  It is committed as the intended
+# runner definition and is explicitly unverified.
 #
-# Package/action notes (verify before trusting a green badge):
-#   - nickg/setup-nvc@v1 installs NVC; MiniCPU-8 used the same action with
-#     "version: latest".  NVC 1.23.0 was used locally.
-#   - Ubuntu's "ghdl" package provides GHDL with VHDL-2008 support.  The
-#     ubuntu-latest image's package version is not pinned here; GHDL 6.0.0 was
-#     used locally (official LLVM macOS archive).  Both simulators are required
-#     by "make vhdl-check".
-#   - Python 3.12 is used; the tools are standard library only.
+# What CI runs: `make test`, the quick suite only.  That includes the Phase 4
+# checks, all leaf RTL testbenches on NVC and GHDL, the quick differential suite
+# (reference traces 01-04, four benchmarks, selected directed tests, 05_mmio and
+# hello excluded as cycle_sensitive) and a 24-program quick fuzz plus 12 curated
+# programs (4 on GHDL).
+#
+# What stays local: the full 300-program fuzz (`make rtl-fuzz`), the 12-mutation
+# check (`make mutation`), and synthesis/Fmax (`make synth-smoke`).
+#
+# Not verified anywhere yet: FORWARDING=true (5B), cycle-exactness against
+# docs/MICROARCH_CONTRACT.md, hardware, and the package/action versions below.
+#
+# Package/action notes:
+#   - nickg/setup-nvc@v1 installs NVC; NVC 1.23.0 was used locally.
+#   - Ubuntu's "ghdl" package provides GHDL 6.x with VHDL-2008.  GHDL 6.0.0 was
+#     used locally (official LLVM macOS archive); the Ubuntu version is unpinned.
+#   - Python 3.12 is used; all tools are standard library only.
 
 name: test
 
@@ -21,7 +30,7 @@ on:
 jobs:
   full:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -41,5 +50,5 @@ jobs:
           nvc --version
           ghdl --version
 
-      - name: Full Phase 4 suite
+      - name: Quick full suite (Phase 4 + Phase 5A)
         run: make test

@@ -1,16 +1,17 @@
-# MiniCPU-16 build and verification (Phase 4)
+# MiniCPU-16 build and verification (Phase 5A)
 #
-#   make test        consistency + negative self-test + VHDL (NVC and GHDL) +
-#                    assembler/disassembler + golden model + traces + programs +
-#                    benchmarks + random generator self-validation
+#   make test        Phase 4 checks + leaf RTL testbenches (NVC and GHDL) +
+#                    quick differential suite + quick fuzz.  Fails loudly.
+#   make rtl-test    leaf testbenches and the full differential suite, both sims
+#   make rtl-fuzz    full 300-program fuzz on NVC + fixed 50-program GHDL subset
+#   make mutation    the 12-mutation verification check
+#   make synth-smoke Yosys/GHDL inference check (time-boxed; needs the plugin)
 #   make bench       print the benchmark table and regenerate docs/BENCHMARKS.md
-#   make vhdl-check  analyse the constants package and a generated program
-#                    package with both NVC and GHDL (VHDL-2008)
 #   make clean       remove build/, work/ and __pycache__
 #
-# GHDL is a second, independent simulator.  The default below finds it on PATH
-# (the CI job installs the distro package); on this machine the official 6.0.0
-# LLVM archive is used from /tmp.  Override with: make GHDL=/path/to/ghdl test
+# GHDL is the second simulator.  The default below finds it on PATH (CI) and
+# otherwise uses the official 6.0.0 LLVM archive in /tmp (this machine).
+# Override with: make GHDL=/path/to/ghdl test
 
 NVC       ?= nvc
 GHDL_BUNDLED := /tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl
@@ -21,15 +22,14 @@ NVC_DIR   := $(BUILD)/nvc
 GHDL_DIR  := $(BUILD)/ghdl
 PY        := python3
 
-.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest \
-        tracetest bench bench-check clean
+.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         rtl-fuzz-quick rtl-test rtl-fuzz mutation synth-smoke
 
 all: test
 
-test: consistency vhdl-check asmtest simtest programstest gentest bench-check
+test: consistency vhdl-check asmtest simtest programstest gentest bench-check       rtl-leaf rtl-suite-quick rtl-fuzz-quick
 	@echo ""
 	@echo "==================================================="
-	@echo "  ALL MINICPU-16 PHASE 4 CHECKS PASSED"
+	@echo "  ALL MINICPU-16 PHASE 5A CHECKS PASSED"
 	@echo "==================================================="
 
 consistency:
@@ -72,6 +72,37 @@ bench-check:
 
 bench:
 	@$(PY) tools/bench.py
+
+rtl-leaf:
+	@echo "=== leaf RTL testbenches: NVC and GHDL ==="
+	@$(PY) tools/rtl_leaf_tests.py --sim both --workdir $(BUILD)/rtl_leaf
+
+rtl-suite:
+	@echo "=== full differential suite: reference traces, benchmarks, directed ==="
+	@$(PY) tools/rtl_suite.py --sim both --workdir $(BUILD)/rtl_suite
+
+rtl-suite-quick:
+	@echo "=== quick differential suite: NVC and GHDL ==="
+	@$(PY) tools/rtl_suite.py --sim both --quick --workdir $(BUILD)/rtl_suite_quick
+
+rtl-fuzz-quick:
+	@echo "=== quick differential fuzz (24 random + 12 curated, NVC; 4 GHDL) ==="
+	@$(PY) tools/rtl_fuzz.py --n 24 --quick --sim nvc --ghdl-subset 4 	    --workdir $(BUILD)/rtl_fuzz_quick
+
+rtl-test: rtl-leaf rtl-suite
+	@echo "RTL full differential test complete"
+
+rtl-fuzz:
+	@echo "=== full differential fuzz: 300 random + 12 curated on NVC, 50 on GHDL ==="
+	@$(PY) tools/rtl_fuzz.py --n 300 --sim nvc --ghdl-subset 50 	    --workdir $(BUILD)/rtl_fuzz
+
+mutation:
+	@echo "=== mutation check: 12 injected RTL bugs ==="
+	@$(PY) tools/mutation_check.py --workdir $(BUILD)/mutation
+
+synth-smoke:
+	@echo "=== synthesis inference smoke test (Yosys + ghdl-yosys-plugin) ==="
+	@$(PY) tools/synth_smoke.py --build $(BUILD)/synth
 
 clean:
 	@rm -rf $(BUILD) work

@@ -118,3 +118,25 @@ MiniCPU-8 tree was never modified. See the final report.
 No other deviations. In particular: HALT=0, R0 hardwired, no flags, 5-stage
 pipeline, not-taken prediction, load-use stall including store data, reset gating,
 and the MMIO map are implemented exactly as locked.
+
+---
+
+## 4. Phase 5A decisions (continuing the numbering)
+
+| # | Area | Decision | Alternatives considered | Reason |
+|---|---|---|---|---|
+| D31 | RTL shape | One RTL with `FORWARDING : boolean`; Phase 5A runs with `false`. The forwarding muxes and `forwarding_unit` are structurally present but select ID/EX values in 5A. | Two separate RTLs; no forwarding unit until 5B. | The brief requires a single codebase. The 5B change is then a generic/verification step, not a rewrite. `FORWARDING=true` is **unverified** in 5A. |
+| D32 | 5A hazard rule | Stall in ID while a producer of an actual source is in EX or MEM and rd /= R0; WB is covered by write-through. Distance 1 costs two stalls, distance 2 one, distance 3 none. | Load-use-only stall with no forwarding (would be incorrect); full forwarding now. | No forwarding means the value is only architecturally visible in WB. The conservative rule is correct and simple. Cycle counts intentionally differ from the contract and are not compared. |
+| D33 | 5A cycle comparison | Compare retirement records with `retire` ignored, plus final architectural state. Do not compare cycles, stalls or CPI. | Compare cycles and accept mismatches; invent a new cycle contract. | 5A is intentionally slower. 5B owns cycle exactness. Flush counts are still compared because they are independent of the stall rule. |
+| D34 | Image loading | Testbench-only impure textio function at elaboration, returning unconstrained `instr_image_t`/`byte_image_t`; the core pads/constrains them. | VHDL package per program; hex through ports. | Works in NVC and GHDL (F21), keeps the core synthesizable and free of file I/O, and avoids a per-program compile. |
+| D35 | Retirement interface | The core exposes a combinational RETIRE port; the testbench assigns sequence numbers and the retire cycle. | Core owns a trace buffer/FIFO; debug port. | No trace storage in synthesizable RTL, no simulation-only constructs, and the testbench can drain/check after HALT. Synthesis removes the port when unconnected. |
+| D36 | Coverage counters | Optional `COUNTING` generic and `cov` array; false by default, true in the testbench. Counters observe only, never drive architectural state. | Recover all coverage from the trace. | Stalls by cause and HALT-in-shadow cannot be recovered reliably from an architectural trace. The counters are verification-only and removable. |
+| D37 | Cycle-sensitive tests | Exclude `05_mmio` (GPIO_IN/TIMER/UART_STATUS) and `hello` (UART polling) from 5A differential comparison. Fuzz uses write-only MMIO and `UART_CYCLES_PER_BYTE=0`. | Model the synchroniser/cycle timing in the golden model now. | 5A has no cycle exactness, so these programs are not meaningful vectors. The RTL still runs one directed UART-drop program with a hand expectation. |
+| D38 | UART busy model | Busy countdown for `UART_CYCLES_PER_BYTE` cycles after the write; the write cycle itself is not observable by a status load (one MEM stage). | Match the golden `cycle <= busy_until` literally, including the write cycle. | Observationally equivalent in this pipeline; documented in F2. |
+| D39 | GPIO_IN | Two-flop synchroniser in the RTL; programs reading GPIO_IN are cycle_sensitive and excluded in 5A. | Remove the synchroniser to match the golden immediate value. | The brief requires a synchroniser; removing it would be a hardware-quality regression. F1. |
+| D40 | Verification tools | `rtl_run.py` (single case), `rtl_suite.py` (suite), `rtl_fuzz.py`, `mutation_check.py`, `rtl_leaf_tests.py`, `synth_smoke.py`; all standard-library Python. | One monolithic script; third-party frameworks. | Each tool has one job and can be run independently; `make test` chains the quick versions. |
+| D41 | Mutation 11 | The mutation delays store visibility by one cycle via a previous-store shadow in dmem; a store-to-load at distance 1 returns the old value. | Change the store commit point in the core (would require a second dmem write port). | The shadow reproduces the architectural bug with a small, compile-clean textual change; a_store_load_d1 detects it. |
+| D42 | Synthesis scope | Synthesize the core with default generics and report SB_RAM40_4K/LUT/FF; Fmax from nextpnr is an estimate only, seed 1, target 50 MHz. Do not tune. | Optimize for Fmax now. | Phase 5A is functional verification; timing is Phase 6. |
+
+No ISA, ABI, microarchitecture-contract or golden-model change was required in
+Phase 5A. The only non-RTL changes are testbenches, tools and documentation.

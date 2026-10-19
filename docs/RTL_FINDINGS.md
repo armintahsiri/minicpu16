@@ -205,6 +205,104 @@ only when the write is accepted. The trace's store record is independent of
 acceptance. The UART-drop directed test checks one accepted and one dropped byte.
 No change.
 
+## F18. IF/ID instruction hold during a stall (RTL bug found and fixed)
+
+**Evidence.** The first CPU testbench run (a 4-instruction smoke program)
+retired only 3 instructions.  The imem output register was serving directly as the
+IF/ID instruction field.  During a stall the PC is frozen at the *fetch pointer*,
+which is two instructions ahead of the ID instruction; re-reading `pc` therefore
+replaced the ID instruction with the younger fetched word.  This is a property
+of using a synchronous BRAM output register as the pipeline register, not a spec
+ambiguity.
+
+**Fix.** During `stall=1`, the imem address is `if_id_pc` instead of `pc`.  The
+output register re-reads and holds the ID instruction; PC still holds the fetch
+pointer.  The smoke trace then contained all four instructions, and all directed,
+reference and benchmark traces passed.  Documented in `RTL_ARCH.md` section 3.1.
+No contract or golden-model change is needed: this is an RTL implementation fix.
+
+## F19. DMEM little-endian concatenation (RTL bug found and fixed)
+
+**Evidence.** The first dmem testbench run failed every word read with the two
+bytes swapped (`CDAB` instead of `ABCD` for a stored value `0xABCD`).  The
+expression `even_bank(i) & odd_bank(i)` puts the even byte in the high half; the
+ISA is little-endian, so the even byte is the low half.
+
+**Fix.** Read `odd_bank(i) & even_bank(i)`.  All dmem checks and all subsequent
+differential traces passed.  No change to the ISA, contract, or golden model.
+
+## F20. Post-HALT drain check (verification gap found by mutation 9)
+
+**Evidence.** The mutation "HALT does not flush younger instructions" was not
+detected by `d_halt`: the younger instruction retires one cycle *after* HALT, and
+the testbench stopped at the HALT retirement.  The architectural trace of a
+normal run still ended at HALT, so the bug was invisible.
+
+**Fix.** The CPU testbench now continues for `DRAIN_CYCLES=2` after HALT and
+asserts that `retire_valid=0` and the frozen PC does not move.  Mutation 9 is now
+detected by `d_halt`.  This is a testbench strengthening, not a spec change.
+
+## F21. Textio image loading works in NVC and GHDL
+
+**Evidence.** The brief allowed a package-per-program fallback if elaboration-time
+textio loading failed in either simulator.  A generic `instr_image_t`/
+`byte_image_t` loaded by an impure function at elaboration was tested in NVC
+1.23 and GHDL 6.0.0; both produced identical traces.  The fallback was not needed.
+
+**Decision.** Keep the textio+generic approach.  Document the NVC detail that the
+work library lives under the work directory (`<work>/work`), and the GHDL detail
+that `GHDL_PREFIX` must point at the GHDL library prefix (not the install root) for
+ghdl-yosys-plugin.  Environment only; no design change.
+
+## F22. Synthesis plugin environment
+
+**Evidence.** `ghdl-yosys-plugin` built at tag `ghdl-v6.0.0` needs
+`GHDL_PREFIX=<ghdl>/lib/ghdl`; with the install root it searched for
+`<prefix>/ieee/v08` and failed.  The built module is
+`/tmp/ghdl-yosys-plugin/ghdl.so` and Yosys 0.70 loads it with `-m`.
+
+**Decision.** Record the exact command in `tools/synth_smoke.py` and the final
+report.  The target remains time-boxed and non-blocking.
+
+## F23. DMEM block-RAM inference (RTL structure changed, behaviour unchanged)
+
+**Evidence.** The first Yosys/GHDL synthesis attempt expanded the dmem byte banks
+to 4096+ flip-flops and the whole core synthesis stalled for minutes.  A minimal
+reproduction showed that GHDL emits `$memrd_v2`/`$memwr_v2` for a single bank with
+an unconditional registered read, but expands two banks placed in one clocked
+process, or banks with conditional reads, into flip-flops and muxes.  `memory_dff`
+could not merge the read register into the memory because the read was enabled and
+because the odd-bank write data was a mux inside the process.
+
+**Fix (behaviour-preserving).**
+
+* one clocked process per byte bank, each with exactly one array;
+* unconditional registered bank reads (the pipeline valid bits decide whether the
+  value is used), so the read register merges into the BRAM output register;
+* the odd-bank write data is selected combinationally (`odd_wdata`) instead of a
+  mux inside the process;
+* the read type/address is captured in parallel with the bank read for the WB mux;
+* dmem has no reset branch in the memory processes (BRAM has no reset); the core
+  gates `mem_load_en`/`mem_store_en` with `rst`, and the dmem output is forced to
+  zero during reset combinationally.
+
+**Result.** The core wrapper synthesises 24 `SB_RAM40_4K` (16 instruction +
+8 data) and completes in seconds; all 8,023,388 leaf checks (both simulators), the
+directed suite, reference traces, benchmarks and the 312-program fuzz still pass.
+No ISA, contract or golden-model change.
+
+## F24. The true default core constant-folds its instruction ROM
+
+**Evidence.** `minicpu16_core` with the true default generics has a one-word
+`INSTR_INIT` (HALT).  Yosys correctly constant-folds it: the default-core
+synthesis reports 0 `SB_RAM40_4K`, 43 LUT4 and 125 flip-flops.  This is a valid
+but empty design, not an inference failure.
+
+**Decision.** `tools/synth_smoke.py` reports both: the true default core (0 BRAM)
+and a synthesis-only wrapper with a non-constant 2048-word image (24 BRAM).  The
+wrapper is not part of the architectural RTL.  Fmax numbers from nextpnr are
+estimates (seed 1, target 50 MHz), not tuned results.
+
 ---
 
 ## Contract/model changes in Phase 5A

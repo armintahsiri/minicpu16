@@ -5,9 +5,16 @@ against a Python golden model by retirement-trace comparison.**
 
 ![CI](https://github.com/armintahsiri/minicpu16/actions/workflows/test.yml/badge.svg)
 
-Status: **Phase 4 complete** - ISA frozen, toolchain and golden model working.
-There is **no CPU RTL yet** except the constants-only package
-<code>rtl/minicpu16_pkg.vhd</code>.  The pipelined CPU is Phase 5.
+Status: **Phase 5A complete** - a 5-stage pipelined VHDL CPU with stall-only
+hazard handling, verified architecturally against the golden model by
+differential retirement traces and fuzzing.  The ISA is frozen
+(<code>isa-v1-frozen</code>), the retirement trace is identical to the golden
+model (retire cycles ignored), and 12/12 injected RTL bugs are detected.
+
+**Phase 5A does not claim cycle-exactness.**  Forwarding is structurally present
+but `FORWARDING=true` is unverified; 5A stalls instead and is intentionally
+slower than `docs/MICROARCH_CONTRACT.md`.  There is no hardware test and CI has
+not been executed on GitHub.
 
 ## Goals
 
@@ -36,7 +43,16 @@ actually run.
 | <code>docs/BENCHMARKS.md</code> | benchmark table generated from real runs |
 | <code>docs/COMPILER_SPIKE.md</code> | lcc/SDCC/chibicc licensing and backend-risk findings |
 | <code>docs/ENVIRONMENT.md</code> | tool versions used |
-| <code>rtl/minicpu16_pkg.vhd</code> | constants/types only; analyses with NVC and GHDL |
+| <code>rtl/minicpu16_pkg.vhd</code> | constants, opcodes, control record, image types, coverage indices |
+| <code>rtl/*.vhd</code> | register file, ALU, shifter, branch unit, decoder, hazard/forwarding units, imem, dmem, MMIO, core |
+| <code>rtl/tb/</code> | CPU trace testbench plus one self-checking testbench per leaf module |
+| <code>docs/RTL_ARCH.md</code> | Phase 5A block diagram, pipeline fields, memory timing, stall/flush equations, cycle tables |
+| <code>docs/RTL_FINDINGS.md</code> | spec audits and RTL bugs found/fixed |
+| <code>tools/rtl_run.py</code> | assemble -> golden -> RTL -> trace diff for one program |
+| <code>tools/rtl_suite.py</code> | reference traces, benchmarks and directed differential suite |
+| <code>tools/rtl_fuzz.py</code> | seeded differential fuzzer with coverage table |
+| <code>tools/mutation_check.py</code> | 12-mutation verification check |
+| <code>tools/synth_smoke.py</code> | Yosys/GHDL block-RAM inference smoke test |
 | <code>tools/assembler.py</code> | assembler with VHDL/hex/mem/listing outputs |
 | <code>tools/disassembler.py</code> | canonical disassembler and round-trip decoder |
 | <code>tools/isa_sim.py</code> | architectural and cycle-accurate timing golden model |
@@ -47,24 +63,27 @@ actually run.
 | <code>programs/</code> | benchmarks and <code>runtime/</code> (crt0, soft arithmetic, strings) |
 | <code>tests/reference_traces/</code> | five asm + trace pairs for the first Phase 5 vectors |
 
-## Planned microarchitecture (Phase 5)
+## Implemented microarchitecture (Phase 5A)
 
     IF -> ID -> EX -> MEM -> WB
      |     |     |
-     |     |     +-- branch / JAL / JALR resolved here
+     |     |     +-- branch / JAL / JALR resolved in EX
      |     |         taken => flush IF and ID (2-cycle penalty)
-     |     +-------- decode, register read, load-use hazard check
-     +-------------- PC, synchronous instruction BRAM
+     |     +-------- decode, register read with WB->ID write-through, stall check
+     +-------------- PC, synchronous instruction BRAM (output register = IF/ID instr)
 
     Harvard memories: instruction BRAM (32-bit words, INSTR_WORDS)
-                      data BRAM (16-bit words with byte enables, RAM_BYTES)
-    MMIO page at 0xFF00: UART, GPIO, TIMER
+                      data BRAM (two byte banks, RAM_BYTES)
+    MMIO page at 0xFF00: UART_TX/STATUS, GPIO_OUT/IN, TIMER, reserved
 
-Baseline contract: static not-taken prediction, full forwarding
-(EX/MEM->EX, MEM/WB->EX, WB->ID), one-cycle load-use stall including a store that
-uses the loaded value as data, HALT drains and retires, reset changes no
-architectural state except PC.  Exact rules and hand-computed cycle examples are in
-<code>docs/MICROARCH_CONTRACT.md</code>.
+Phase 5A uses **stall-only hazards**: an ID instruction stalls while a producer of
+one of its actual sources is in EX or MEM (rd != R0); WB is covered by the
+write-through.  This is two stalls at distance 1, one at distance 2, none at
+distance 3.  The forwarding muxes and `forwarding_unit` are structurally present
+and drive `FORWARDING=true` in 5B, but that mode is **unverified**.  HALT drains
+and retires, younger instructions are flushed, and reset changes no architectural
+state except the specified PC/GPIO_OUT/TIMER/UART state.  Full equations, cycle
+tables and the memory interface timing are in <code>docs/RTL_ARCH.md</code>.
 
 ## ISA summary
 
@@ -114,13 +133,29 @@ Run everything from scratch:
 
 Individual checks:
 
-    make consistency     # docs vs VHDL vs assembler vs golden model + mutation test
+    make consistency     # docs vs VHDL vs assembler vs golden model + self-test
     make vhdl-check      # NVC and GHDL, VHDL-2008, constants + generated package
     make asmtest         # assembler encodings/errors and disassembler round-trip
     make simtest         # ISA, timing contract and trace-diff tests
     make programstest    # all benchmark programs and their expected results
     make gentest         # 200 random programs + reference traces
     make bench           # print table and regenerate docs/BENCHMARKS.md
+    make rtl-leaf        # 11 self-checking leaf testbenches, NVC and GHDL
+    make rtl-suite       # reference traces + benchmarks + directed, both sims
+    make rtl-fuzz        # 300 random + 12 curated programs; 50 on GHDL
+    make mutation        # 12 injected RTL bugs must be caught
+    make synth-smoke     # Yosys/GHDL block-RAM inference and Fmax estimate
+
+Run one RTL program differentially:
+
+    python3 tools/rtl_run.py tests/directed/a_store_load_d1.asm \
+        --name a_store_load_d1 --sim nvc \
+        --expected tests/directed/a_store_load_d1.expected
+
+    python3 tools/rtl_run.py programs/bubble_sort.s --runtime --sim ghdl
+
+The default comparison ignores the retire-cycle column (5A).  Use
+<code>--check-cycles</code> only for Phase 5B.
 
 Assemble, run and trace a program:
 
@@ -158,8 +193,11 @@ From <code>docs/BENCHMARKS.md</code>; default 4 KB RAM, 2048 instruction words,
 | nested_calls | 55 | 85 | 1.545 | 43.6 | 14.5 | 16.4 | 1.8 | 21.8 | 100.0 | 0 |
 | funcptr | 30 | 48 | 1.600 | 60.0 | 3.3 | 10.0 | 3.3 | 20.0 | 100.0 | 0 |
 
-CPI above 1 is the pipeline fill/drain, taken-branch penalty and load-use stalls;
-Phase 5 must reproduce these numbers exactly before any optimization.
+CPI above 1 is the pipeline fill/drain, taken-branch penalty and load-use stalls.
+These are the **contract** numbers from the golden timing layer.  The 5A RTL is
+intentionally slower (stall-only) and its cycle counts are **not** compared; 5B
+owns cycle exactness.  For example, 5A bubble_sort takes 2647 cycles instead of
+1950, with 817 stall cycles instead of 120.
 
 ## Tests actually run
 
@@ -172,16 +210,47 @@ Phase 5 must reproduce these numbers exactly before any optimization.
 * programs: 6 test methods / 290 checks
 * generator: 5 test methods / 80 checks (200 programs, all opcodes, all hazard patterns)
 * VHDL: NVC and GHDL both analyse the constants package and a generated program package
-* 5 reference traces reproduce byte-for-byte
+* leaf RTL: 11 testbenches / **8,023,388 checks across NVC and GHDL** (4,011,694 per simulator), 0 failures
+* differential suite: **61 case-runs, 0 failed** (NVC 43 = 4 reference traces +
+  10 benchmarks + 29 directed; GHDL 18); reference traces 01-04 match
+  architecturally, 05_mmio is excluded as cycle_sensitive
+* full fuzz (<code>make rtl-fuzz</code>): **312 programs on NVC, 50 on GHDL,
+  0 mismatches**, every coverage counter non-zero
+* mutation: **12/12 injected bugs detected**
+
+Cycle counts in 5A are intentionally higher than the contract; only architectural
+retirement records and final state are compared.
+
+### Synthesis smoke (<code>make synth-smoke</code>, estimate only)
+
+Yosys 0.70 + ghdl-yosys-plugin (GHDL 6.0.0) and <code>synth_ice40</code>, default
+generics except a non-constant 2048-word image (the default image is one HALT word
+and constant-folds to 0 BRAM):
+
+* **24 `SB_RAM40_4K`** (16 instruction + 8 data), 1263 LUT4, 611 flip-flops
+* HX8K (ct256, seed 1, target 50 MHz): **59.22 MHz**, PASS
+* UP5K (sg48, seed 1, target 50 MHz): **25.58 MHz**, FAIL at 50
+* critical paths: HX8K instruction-BRAM output -> decode/control; UP5K `b_ex` ->
+  `ex_mem_result`
+
+These are placement/routing estimates, not hardware measurements; the design was
+not tuned for Fmax in Phase 5A.
 
 ## Honest limitations
 
-* **No CPU RTL yet.**  The timing layer is a contract, not silicon.  Nothing in
-  this phase has been synthesized, placed, routed, or measured for Fmax.
-* The timing model has not been checked against real hardware; that is the main
-  Phase 5 activity.
-* CI is written but **not run** here (no GitHub remote yet).  The workflow installs
-  NVC and the distro GHDL; package versions and action behaviour are unverified.
+* **No cycle-exactness claim.**  Phase 5A is stall-only; its cycles are not the
+  contract's cycles.  <code>FORWARDING=true</code> is structurally present but
+  **unverified**.  That is Phase 5B's job.
+* **No hardware test.**  Nothing has run on an FPGA.  The synthesis smoke test is
+  an inference/count estimate, not a placed-and-routed hardware result; Fmax is an
+  estimate with a fixed seed.
+* CI is written and updated for Phase 5A, but it has **not been executed on
+  GitHub**.  The workflow installs NVC and the distro GHDL; package versions and
+  action behaviour are unverified.  Mutation and full fuzz stay local.
+* MMIO programs that observe cycle timing (TIMER, UART_STATUS polling, GPIO_IN)
+  are excluded from the 5A differential suite; 05_mmio and hello are the named
+  exclusions.  GPIO_IN has a two-flop synchroniser, so it is not the golden
+  model's immediate value.
 * No MUL/DIV in the base ISA; software routines exist but multiply, divide and
   modulo have not yet been exercised through a C compiler.
 * No traps, interrupts, exceptions, memory protection, caches, or atomics.
@@ -196,9 +265,13 @@ Phase 5 must reproduce these numbers exactly before any optimization.
 
 ## Roadmap
 
-* **Phase 5** - 5-stage pipelined RTL, BRAM memories, MMIO, HALT drain, reset
-  gating; retirement-trace differential fuzzing against the golden model; the five
-  reference traces are the first vectors.
+* **Phase 5A (done)** - 5-stage pipelined RTL, synchronous instruction/data
+  memories, MMIO, HALT drain, reset gating, stall-only hazard handling; leaf
+  testbenches, directed tests, reference traces, benchmarks, 312-program fuzz and
+  12/12 mutation detection.
+* **Phase 5B** - enable forwarding, verify the one-cycle load-use rule, and make
+  the RTL cycle-exact against <code>docs/MICROARCH_CONTRACT.md</code>; then the
+  reference-trace retire cycles and benchmark cycle counts become assertions.
 * **Phase 6** - FPGA synthesis and timing (Yosys/nextpnr), UART/GPIO/TIMER on real
   hardware, CPI/Fmax on these benchmarks, MUL evaluation, BTFN evaluation.
 * **Phase 7** - a C-subset compiler (Python, MIT, standard library only) targeting

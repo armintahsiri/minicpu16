@@ -100,6 +100,12 @@ at that same edge. In `c+1` the word is decoded in ID. This gives the contract's
   Out of range selects `HALT_WORD` at the output register.
 * On redirect the output register holds one or two stale words; their IF/ID valid
   bits are zero and they never enter ID/EX.
+* **Stall hold:** while a 5A stall is applied, the imem address is switched from
+  the fetch pointer `pc` to `if_id_pc` (the PC of the instruction sitting in
+  IF/ID).  The output register therefore re-reads and holds that instruction while
+  PC is frozen; re-reading the fetch pointer would replace the ID instruction with
+  the younger one.  This is the only special case in the imem address path.  It
+  was found by the first CPU testbench run (see `docs/RTL_FINDINGS.md` F18).
 * While `stop_fetch=1` the PC is frozen and IF/ID valid is forced zero.
 
 ### 3.2 Data memory and MMIO
@@ -504,8 +510,22 @@ These are predictions, not measurements:
 5. **MMIO address decode -> UART/TIMER/GPIO read mux -> MEM/WB.** The MMIO read mux
    is combinational in MEM and is captured at the MEM/WB edge.
 
-Synthesis will report whether the memories inferred block RAM and what the critical
-path is. Do not tune Fmax in Phase 5A.
+Measured in the Step 7 smoke test (not tuned; estimate, seed 1, target 50 MHz):
+
+| Device | Fmax estimate | Critical path reported by nextpnr |
+|---|---:|---|
+| iCE40 HX8K (ct256) | 59.22 MHz, PASS at 50 | instruction BRAM `RDATA` -> imem output/decode logic |
+| iCE40 UP5K (sg48) | 25.58 MHz, FAIL at 50 | `b_ex` (EX operand register) -> `ex_mem_result` (ALU/address path) |
+
+The predicted forwarded-operand -> branch -> PC path was **not** the reported
+critical path for this seed in 5A (forwarding is disabled).  The prediction is
+still the one to re-check in 5B.  The HX8K path is the instruction-memory output
+feeding decode/control; the UP5K path is an EX operand to the EX/MEM result.  The
+design was not tuned for Fmax in this phase.
+
+Synthesis inferred 24 `SB_RAM40_4K` (16 instruction + 8 data) in the wrapper with a
+non-constant image, plus 1263 LUT4 and 611 flip-flops.  The true default core
+(all-zero HALT image) constant-folds to 0 BRAM; see `docs/RTL_FINDINGS.md` F23/F24.
 
 ---
 
@@ -521,4 +541,39 @@ path is. Do not tune Fmax in Phase 5A.
 * Mutation check for the 12 listed bugs.
 * Synthesis inference smoke test with GHDL + ghdl-yosys-plugin + Yosys, time-boxed.
 
-The exact results are in the final report and are not repeated here.
+## 9. As-built notes (end of Phase 5A)
+
+* All leaf modules and the core are implemented in the files listed in section 6.
+* The synchronous imem output register is the IF/ID instruction field; a stall
+  holds it by re-reading `if_id_pc` (F18).  A redirect lets it hold one stale word
+  with valid=0, as designed.
+* The CPU testbench checks that no instruction retires and the fetch PC does not
+  move for two cycles after HALT.  This closes a verification gap found by the
+  mutation check (F20).
+* Image loading uses an impure textio function at elaboration and a generic
+  `instr_image_t`/`byte_image_t`; it works identically in NVC and GHDL, so the
+  package-per-program fallback was not needed (F21).
+* `make test` runs the Phase 4 suite, all leaf testbenches on NVC and GHDL, the
+  quick differential suite and a quick fuzz.  `make rtl-fuzz`, `make mutation`
+  and `make synth-smoke` are separate, longer targets.
+* DMEM inference required splitting the two byte banks into two clocked processes
+  with unconditional registered reads; see `docs/RTL_FINDINGS.md` F23.  The core
+  wrapper now synthesises 24 `SB_RAM40_4K` (16 instruction, 8 data).
+* The true default core (one-word HALT image) constant-folds to 0 BRAM; the
+  synthesis smoke test reports both that case and a non-constant-image wrapper
+  (F24).
+
+Measured Phase 5A results (NVC unless stated):
+
+* leaf testbenches: 11 modules x 2 simulators = 8,023,388 checks, 0 failures;
+* reference traces 01-04 and all 10 non-cycle-sensitive benchmarks: architectural
+  retirement trace identical, retire cycles intentionally different;
+* 29 directed programs (scenarios a-i, plus the 65536-word PC-wrap case): all
+  match the golden model and their hand-computed final states;
+* full fuzz: 300 random + 12 curated programs on NVC, 50 on GHDL, 0 mismatches,
+  every coverage counter non-zero;
+* 12/12 mutations detected;
+* synthesis: 24 `SB_RAM40_4K`, 1263 LUT4, 611 FFs; HX8K 59.22 MHz (PASS at 50),
+  UP5K 25.58 MHz (FAIL at 50), seed 1, no tuning.
+
+The exact per-case numbers are in the final report; they are not repeated here.
