@@ -115,6 +115,7 @@ IO_SYMBOLS: Dict[str, int] = {
     "TIMER": 0xFF08,
     "MMIO_BASE": 0xFF00,
     "MMIO_LAST": 0xFFFF,
+    "MMIO_RESERVED": 0xFF0A,
 }
 
 # ---------------------------------------------------------------------------

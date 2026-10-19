@@ -137,7 +137,7 @@ execute as NOP. Reserved does not mean trap: there are no traps.
 | 0x01 | ADD | R | rd = (rs1 + rs2) mod 2^16 |
 | 0x02 | SUB | R | rd = (rs1 - rs2) mod 2^16 |
 | 0x03 | AND | R | rd = rs1 & rs2 |
-| 0x04 | OR | R | rd = rs1 | rs2 |
+| 0x04 | OR | R | rd = rs1 OR rs2 |
 | 0x05 | XOR | R | rd = rs1 ^ rs2 |
 | 0x06 | SLL | R | rd = (rs1 << (rs2 & 0xF)) mod 2^16 |
 | 0x07 | SRL | R | rd = zext(rs1) >> (rs2 & 0xF) |
@@ -146,7 +146,7 @@ execute as NOP. Reserved does not mean trap: there are no traps.
 | 0x0A | SLTU | R | rd = 1 if zext(rs1) < zext(rs2) else 0 |
 | 0x0B | ADDI | I | rd = (rs1 + imm16) mod 2^16 |
 | 0x0C | ANDI | I | rd = rs1 & imm16 |
-| 0x0D | ORI | I | rd = rs1 | imm16 |
+| 0x0D | ORI | I | rd = rs1 OR imm16 |
 | 0x0E | XORI | I | rd = rs1 ^ imm16 |
 | 0x0F | SLLI | I | rd = (rs1 << (imm16 & 0xF)) mod 2^16 |
 | 0x10 | SRLI | I | rd = zext(rs1) >> (imm16 & 0xF) |
