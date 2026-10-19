@@ -1,0 +1,67 @@
+[
+  {
+    "asm_sha256": "4ef15428c6786902c0c5efd46c0fdd7dee22fc4678771008f4dae95c6a057c31",
+    "cycles": 47,
+    "halted": true,
+    "instr_words": 2048,
+    "instructions": 37,
+    "mode": "straight",
+    "name": "01_straight",
+    "pc": 10,
+    "ram_bytes": 4096,
+    "seed": 11,
+    "trace_sha256": "02b2bbfdc66728127a29675a1c14cbd5464c720097a14582f1f17685862c1675"
+  },
+  {
+    "asm_sha256": "d7e059003ef05ce23da8208d343c4cf17c6a1dcc5fdf45f0ee7887aaee748ec5",
+    "cycles": 83,
+    "halted": true,
+    "instr_words": 2048,
+    "instructions": 67,
+    "mode": "loop",
+    "name": "02_loop",
+    "pc": 10,
+    "ram_bytes": 4096,
+    "seed": 12,
+    "trace_sha256": "6d5c42d31697d72cc3618be40476d8622a52c814c07712bf9d6b0d46e2d76107"
+  },
+  {
+    "asm_sha256": "6d26f3bca56651c141bf13bb6f6cc98dc5dd884764b2fe5b59ac34abdb09fefd",
+    "cycles": 54,
+    "halted": true,
+    "instr_words": 2048,
+    "instructions": 28,
+    "mode": "calls",
+    "name": "03_calls",
+    "pc": 10,
+    "ram_bytes": 4096,
+    "seed": 13,
+    "trace_sha256": "6d945a447d7fc9e703d496d6f6285f6c8fff8134aa0569081792cd4dae5c76f5"
+  },
+  {
+    "asm_sha256": "5e2041c5dcda065bc354ebc785b62522bc72a1cc299281dfa36bb8e3aa7e26d4",
+    "cycles": 86,
+    "halted": true,
+    "instr_words": 2048,
+    "instructions": 59,
+    "mode": "hazards",
+    "name": "04_hazards",
+    "pc": 10,
+    "ram_bytes": 4096,
+    "seed": 14,
+    "trace_sha256": "b6ad61d1e92c893b2760a62d4837d97320452d66aafcc00cdc20ef673a614f6d"
+  },
+  {
+    "asm_sha256": "4381767263844bf42effa342339e56c14f6b6576676274b91c43a1900a5b5fcd",
+    "cycles": 37,
+    "halted": true,
+    "instr_words": 2048,
+    "instructions": 27,
+    "mode": "mmio",
+    "name": "05_mmio",
+    "pc": 10,
+    "ram_bytes": 4096,
+    "seed": 15,
+    "trace_sha256": "ccb607b52a659dcd24304b5c5176ed3b732dffc9705b81550924a4592605a369"
+  }
+]
