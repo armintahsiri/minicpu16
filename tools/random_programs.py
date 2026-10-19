@@ -226,6 +226,21 @@ class Gen:
         self.emit("li t0, UART_STATUS")
         self.emit("lw t2, 0(t0)")
 
+    def mmio_writes(self) -> None:
+        # Write-only MMIO: GPIO_OUT and UART_TX, plus a stable GPIO_OUT read.
+        # No TIMER/UART_STATUS/GPIO_IN reads, so a 5A trace is not
+        # cycle_sensitive (the fuzzer uses UART_CYCLES_PER_BYTE=0).
+        self.emit("li t0, GPIO_OUT")
+        self.emit("li t1, 0x%04X" % self.rng.randrange(0x10000))
+        self.emit("sw t1, 0(t0)")
+        self.emit("lw t2, 0(t0)")
+        self.emit("li t3, 0x%04X" % (0xFF05,))
+        self.emit("li a0, 0x%04X" % self.rng.randrange(0x10000))
+        self.emit("sb a0, 0(t3)")
+        self.emit("li a1, UART_TX")
+        self.emit("li a2, 0x%04X" % self.rng.randrange(0x100))
+        self.emit("sw a2, 0(a1)")
+
     def coverage(self) -> None:
         self.emit("li t0, 1")
         self.emit("li t1, 2")
@@ -284,6 +299,8 @@ def generate(seed: int, mode: Optional[str] = None) -> Generated:
         g.hazard_templates()
     elif mode == "mmio":
         g.mmio()
+    elif mode == "mmio_writes":
+        g.mmio_writes()
     elif mode == "coverage":
         g.coverage()
     else:
