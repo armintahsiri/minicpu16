@@ -5,6 +5,7 @@
 
 library ieee;
 use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
 
 package minicpu16_pkg is
 
@@ -139,10 +140,107 @@ package minicpu16_pkg is
   constant UART_CYCLES_PER_BYTE_DEFAULT : integer := 10;
   constant MMIO_WORD_LSB : integer := 1; -- bit 0 of an MMIO address is ignored
 
+  -- Selector encodings used by the leaf modules.
+  constant SHIFT_SLL : std_logic_vector(1 downto 0) := "00";
+  constant SHIFT_SRL : std_logic_vector(1 downto 0) := "01";
+  constant SHIFT_SRA : std_logic_vector(1 downto 0) := "10";
+  constant LOAD_LB   : std_logic_vector(1 downto 0) := "00";
+  constant LOAD_LBU  : std_logic_vector(1 downto 0) := "01";
+  constant LOAD_LW   : std_logic_vector(1 downto 0) := "10";
+  constant FWD_ID    : std_logic_vector(1 downto 0) := "00";
+  constant FWD_EXMEM : std_logic_vector(1 downto 0) := "01";
+  constant FWD_MEMWB : std_logic_vector(1 downto 0) := "10";
+
   -- ---------------------------------------------------------------------
   -- Memory array types for generated images (BRAM-friendly)
   -- ---------------------------------------------------------------------
   type instr_rom_t is array (0 to INSTR_WORDS - 1) of std_logic_vector(31 downto 0);
   type byte_bank_t is array (0 to RAM_WORDS - 1) of std_logic_vector(7 downto 0);
 
+  -- Unconstrained image types used by the Phase 5 core and testbench.  The
+  -- testbench loads a hex file at elaboration and passes the result as a
+  -- generic; the core pads/constrains it to its own INSTR_WORDS/RAM_BYTES.
+  type instr_image_t is array (natural range <>) of std_logic_vector(31 downto 0);
+  type byte_image_t  is array (natural range <>) of std_logic_vector(7 downto 0);
+
+  -- ---------------------------------------------------------------------
+  -- Decoded control bundle carried in the ID/EX, EX/MEM and MEM/WB
+  -- registers.  Every field is assigned by rtl/decoder.vhd.
+  --
+  --   mem_size = '1' -> word (LW/SW), '0' -> byte (LB/LBU/SB)
+  --   use_imm  = '1' -> the ALU b operand is imm16, not rs2
+  --   rs1_en/rs2_en mark actual architectural sources (hazard/forwarding)
+  -- ---------------------------------------------------------------------
+  type ctrl_t is record
+    is_halt    : std_logic;
+    is_nop     : std_logic;
+    is_alu     : std_logic;
+    is_load    : std_logic;
+    is_store   : std_logic;
+    is_branch  : std_logic;
+    is_jal     : std_logic;
+    is_jalr    : std_logic;
+    use_imm    : std_logic;
+    reg_write  : std_logic;
+    mem_read   : std_logic;
+    mem_write  : std_logic;
+    mem_size   : std_logic;
+    rs1_en     : std_logic;
+    rs2_en     : std_logic;
+    rd         : std_logic_vector(3 downto 0);
+    rs1        : std_logic_vector(3 downto 0);
+    rs2        : std_logic_vector(3 downto 0);
+    op         : std_logic_vector(7 downto 0);
+    imm        : std_logic_vector(15 downto 0);
+  end record;
+
+  constant CTRL_ZERO : ctrl_t := (
+    is_halt => '0', is_nop => '0', is_alu => '0', is_load => '0',
+    is_store => '0', is_branch => '0', is_jal => '0', is_jalr => '0',
+    use_imm => '0', reg_write => '0', mem_read => '0', mem_write => '0',
+    mem_size => '0', rs1_en => '0', rs2_en => '0',
+    rd => (others => '0'), rs1 => (others => '0'), rs2 => (others => '0'),
+    op => (others => '0'), imm => (others => '0'));
+
+  -- ---------------------------------------------------------------------
+  -- Optional verification counters (COUNTING generic in the core).  They
+  -- never drive architectural state and are tied to zero when COUNTING is
+  -- false.  The CPU testbench writes them to its state file for the fuzz
+  -- coverage table.
+  -- ---------------------------------------------------------------------
+  constant COV_N : integer := 16;
+  type cov_counters_t is array (0 to COV_N - 1) of std_logic_vector(31 downto 0);
+  subtype cov_t is cov_counters_t;
+
+  constant COV_STALL_TOTAL      : integer := 0;
+  constant COV_STALL_EX         : integer := 1;
+  constant COV_STALL_MEM        : integer := 2;
+  constant COV_STALL_RS1        : integer := 3;
+  constant COV_STALL_RS2        : integer := 4;
+  constant COV_STALL_STORE_DATA : integer := 5;
+  constant COV_FLUSH            : integer := 6;
+  constant COV_HALT_SHADOW      : integer := 7;
+  constant COV_LOAD_R0          : integer := 8;
+  constant COV_UART_DROP        : integer := 9;
+  constant COV_MISALIGNED       : integer := 10;
+  constant COV_MMIO_READ        : integer := 11;
+  constant COV_MMIO_WRITE       : integer := 12;
+  constant COV_STALL_LOAD_USE   : integer := 13;
+  constant COV_FLUSH_BRANCH     : integer := 14;
+  constant COV_FLUSH_JUMP       : integer := 15;
+
+  -- Sign-extend a 16-bit pattern to a 16-bit signed pattern.  This is the
+  -- identity as a bit pattern, but it documents the branch/address/JALR rule
+  -- and avoids accidental unsigned arithmetic in the RTL.
+  function sext16(v : std_logic_vector(15 downto 0)) return std_logic_vector;
+
 end package minicpu16_pkg;
+
+package body minicpu16_pkg is
+
+  function sext16(v : std_logic_vector(15 downto 0)) return std_logic_vector is
+  begin
+    return std_logic_vector(resize(signed(v), 16));
+  end function;
+
+end package body minicpu16_pkg;
