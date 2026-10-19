@@ -1,0 +1,9 @@
+pc 0100
+instructions 10
+reg 0 0000
+reg 1 0000
+reg 2 0100
+reg 3 1234
+reg 4 0000
+reg 5 0000
+ram 0100 3412

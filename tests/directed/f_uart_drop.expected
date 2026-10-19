@@ -1,0 +1,6 @@
+pc 0005
+instructions 6
+reg 1 FF00
+reg 2 0041
+reg 3 0042
+uart 41

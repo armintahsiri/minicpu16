@@ -1,0 +1,5 @@
+pc 0004
+instructions 4
+reg 5 0003
+reg 6 0001
+reg 15 0002

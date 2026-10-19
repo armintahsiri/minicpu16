@@ -1,0 +1,15 @@
+pc 000F
+instructions 16
+reg 1 FF04
+reg 2 1234
+reg 3 1234
+reg 4 FF05
+reg 5 00AB
+reg 6 12AB
+reg 7 FF00
+reg 8 0041
+reg 9 FF0A
+reg 10 0000
+reg 11 0000
+gpio 12AB
+uart 41

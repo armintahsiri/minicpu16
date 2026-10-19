@@ -1,0 +1,7 @@
+pc 0007
+instructions 7
+reg 2 1234
+reg 5 1234
+reg 6 0000
+reg 7 2222
+ram 0100 3412

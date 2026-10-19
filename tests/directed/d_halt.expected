@@ -1,0 +1,5 @@
+pc 0001
+instructions 2
+reg 1 0001
+reg 2 0000
+ram 0001 0000
