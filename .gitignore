@@ -1,0 +1,8 @@
+build/
+work/
+__pycache__/
+.DS_Store
+*.vcd
+*.ghw
+*.o
+*.cf
