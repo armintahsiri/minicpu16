@@ -17,5 +17,5 @@ GitHub release and extracted to the same path, so `make vhdl-check` uses it
 without further installation. On other machines, override with
 `make GHDL=/path/to/ghdl ...`; the Makefile falls back to `ghdl` on `PATH`.
 
-The reference MiniCPU-8 tree at `/Users/armin/Desktop/VHD/files` was read-only
+The reference MiniCPU-8 repository (a separate project) was read-only
 during this phase and was not modified.

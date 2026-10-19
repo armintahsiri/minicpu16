@@ -109,8 +109,8 @@ will be measured in Phase 5/6 after synthesis.
 
 ### P3. Build location (environment deviation, not a design decision)
 
-The requested new repository path was `/Users/armin/Desktop/VHD/minicpu16`, but the
-session sandbox only allows writes under `/Users/armin/Desktop/minicpu16`. The
+The new repository was requested in a dedicated project directory, but the
+session sandbox only allowed writes under a different directory. The
 project was built and tested in the sandbox workspace and then copied to the
 requested path. Both trees contain the same files and git history; the reference
 MiniCPU-8 tree was never modified. See the final report.
