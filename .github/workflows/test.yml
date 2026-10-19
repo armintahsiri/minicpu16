@@ -1,0 +1,45 @@
+# MiniCPU-16 CI.
+#
+# This workflow has NOT been executed (there is no GitHub remote yet).  It is
+# committed as the intended runner definition and is explicitly unverified.
+#
+# Package/action notes (verify before trusting a green badge):
+#   - nickg/setup-nvc@v1 installs NVC; MiniCPU-8 used the same action with
+#     "version: latest".  NVC 1.23.0 was used locally.
+#   - Ubuntu's "ghdl" package provides GHDL with VHDL-2008 support.  The
+#     ubuntu-latest image's package version is not pinned here; GHDL 6.0.0 was
+#     used locally (official LLVM macOS archive).  Both simulators are required
+#     by "make vhdl-check".
+#   - Python 3.12 is used; the tools are standard library only.
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install NVC (VHDL-2008)
+        uses: nickg/setup-nvc@v1
+        with:
+          version: latest
+
+      - name: Install GHDL (VHDL-2008)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl
+          nvc --version
+          ghdl --version
+
+      - name: Full Phase 4 suite
+        run: make test
