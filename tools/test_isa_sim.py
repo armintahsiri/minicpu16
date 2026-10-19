@@ -213,6 +213,16 @@ halt
         self.eq(r.regs[6], 0xBEEF)
         self.eq(r.regs[7], 0xEF)
 
+    def test_gpio_in_write_ignored(self):
+        r = self.run_p("""
+li t0, GPIO_IN
+li t1, 0x1234
+sw t1, 0(t0)
+lw t2, 0(t0)
+halt
+""", gpio_in=0xBEEF)
+        self.eq(r.regs[7], 0xBEEF)
+
     def test_timer(self):
         r = self.run_p("""
 li t0, TIMER
@@ -329,6 +339,18 @@ halt
         self.eq(r.regs[5], 2)
         self.eq(r.regs[1], 0)
         self.eq(r.pc, 3)
+
+    def test_jal_link(self):
+        r = self.run_p("jal r15, 2\naddi r1, r1, 1\nhalt\n")
+        self.eq(r.regs[15], 1)
+        self.eq(r.regs[1], 0)
+        self.eq(r.pc, 2)
+
+    def test_fetch_beyond_instr_words(self):
+        r = run_pipeline([0x01000000, 0x0B100001], Config(instr_words=1))
+        self.eq(r.instructions, 2)
+        self.eq(r.pc, 1)
+        self.eq(r.trace[1].instr, 0)
 
     def test_jalr_target_ffff(self):
         r = self.run_p("li t0, 0xFFFF\njalr r0, t0, 0\nhalt\n")

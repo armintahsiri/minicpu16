@@ -189,7 +189,9 @@ execute as NOP. Reserved does not mean trap: there are no traps.
   the hardware masks, so an out-of-range encoding is still deterministic.
 * Branch and jump offsets are **signed 16-bit** values interpreted by `sext(imm16)`
   and added to `PC + 1`. They are relative to the **next** instruction. Thus a
-  conditional branch can reach PC-32767 .. PC+32768. The assembler checks this range.
+  conditional branch can reach PC-32767 .. PC+32768. Because the PC is 16 bits and
+  wraps, every 16-bit target is reachable by exactly one signed offset; the
+  assembler accepts targets 0..0xFFFF and encodes (target-(PC+1)) mod 2^16.
 * The JALR immediate is signed 16-bit: target = `(zext(rs1_old) + sext(imm16)) mod 2^16`.
   It is an absolute byte-style instruction index, not relative to the PC.
 

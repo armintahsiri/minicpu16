@@ -189,10 +189,6 @@ s:  .asciz "Hi"
         self.eq(img.instr_words[4], 0)
         self.eq(img.instr_words[0], 0)
 
-    def test_include_is_not_supported_in_text_helper_but_works_from_file(self):
-        # Included through the CLI helper is tested in test_cli_include below.
-        self.eq(True, True)
-
     def test_inst(self):
         img = A(".inst 0xDEADBEEF\n.inst 0x00000001\n")
         self.eq(img.instr_words[0], 0xDEADBEEF)
