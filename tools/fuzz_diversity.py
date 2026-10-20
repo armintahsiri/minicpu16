@@ -34,7 +34,8 @@ import random_programs  # noqa: E402
 
 # Must match tools/rtl_fuzz.py MODES order, because the fuzzer picks the mode
 # from the case index while the seed varies.
-MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd"]
+MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd",
+         "store_load"]
 
 
 def normalise(text: str) -> str:

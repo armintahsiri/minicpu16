@@ -523,6 +523,11 @@ still the one to re-check in 5B.  The HX8K path is the instruction-memory output
 feeding decode/control; the UP5K path is an EX operand to the EX/MEM result.  The
 design was not tuned for Fmax in this phase.
 
+> **Updated in Phase 5B.**  The 5B measurement refutes this prediction as well:
+> with `FORWARDING=true` the forwarding mux, the ALU operand mux, the branch
+> comparator and the PC adder are **not** on any measured critical path.  See
+> section 9.1 for the full prediction-versus-measurement table.
+
 Synthesis inferred 24 `SB_RAM40_4K` (16 instruction + 8 data) in the wrapper with a
 non-constant image, plus 1263 LUT4 and 611 flip-flops.  The true default core
 (all-zero HALT image) constant-folds to 0 BRAM; see `docs/RTL_FINDINGS.md` F23/F24.
@@ -865,7 +870,75 @@ distance 1 and stalls one cycle; `r4 = 0x55`, 8 retired, 13 cycles.
 5. **MMIO read mux (UART_STATUS/GPIO_IN/TIMER) -> MEM/WB capture**: a wide mux
    but registered at the end of MEM.
 
-The Step 8 nextpnr reports are compared against these predictions.
+### 9.1 Prediction vs measurement (Step 8, measured)
+
+Measured with `tools/synth_smoke.py` (Yosys 0.70 `synth_ice40` + nextpnr-ice40,
+unconstrained placement, target 50 MHz, seeds 1-3, **no tuning**).  The
+critical paths were read out of the nextpnr JSON report
+(`nextpnr-ice40 --report ... --detailed-timing-report`), not from the console
+text, and each hop was mapped back to the RTL through the Yosys netlist
+(`hdlname` attributes) to name the signals on the path.
+
+| # | Predicted path | Measured path (device, seed) | Verdict |
+|---|---|---|---|
+| 1 | Forwarding mux -> ALU -> branch/target adder -> PC | **REFUTED.** No critical path in any of the 6 forwarding runs goes through the forwarding mux, the ALU operand mux, the branch comparator or the PC adder. The `u_forward` instance appears only once, in the UP5K path, and only as a *control* input (`u.u_forward.ex_reg_write`, i.e. the hazard/valid compare), not as a forwarded operand. | **Refuted** |
+| 2 | dmem bank output -> WB mux -> register file write data | **CONFIRMED (as the real critical path, in a different form).** On HX8K the path starts at the data-memory bank output register `u.u_dmem.odd_bank.0.0_RAM.RDATA_3` and ends at the PC register's clock-enable; on UP5K it starts at `u.u_dmem.odd_bank.0.1_RAM.RDATA_11`. The bank output is *not* on a path to the register file: it feeds the `ex_mem_addr`/load-data logic, and the load data reaches the register file only through the MEM/WB register, i.e. it is a register-to-register path. | **Confirmed, but the endpoint differs** |
+| 3 | Hazard/forwarding compare (4-bit equality) -> operand mux select | **PARTIALLY CONFIRMED.** The compare does sit on the measured path, but as the *stall/valid* compare, not as the operand-source select: `u.u_hazard.ex_reg_write` and `u.u_forward.ex_reg_write` -> `u.mem_wb_valid` -> `u.id_ex_valid` -> `u.stop_fetch` -> PC enable. The operand-source select itself (`fwd_a`/`fwd_b`) is off the critical path. | **Partially confirmed** |
+| 4 | imem address mux (stall) -> BRAM address | **CONFIRMED for the non-forwarding build only.** With `FORWARDING=false` the HX8K path starts at `u.u_imem.:471.0.15_RAM.RDATA_11` (the instruction BRAM output) and runs through the decoder to `u.u_hazard.ex_reg_write` -> `u.if_id_valid` -> `u.id_ex_valid` -> `u.stop_fetch` -> the `u.if_id_pc` register enable. With `FORWARDING=true` the same imem/decode cone is present but is no longer the longest path. | **Confirmed in the 5A configuration, not the longest path in 5B** |
+| 5 | MMIO read mux -> MEM/WB capture | **REFUTED.** No MMIO read mux appears on any measured critical path. The MMIO cone does appear in the *second*-ranked path of the forwarding runs (via `u.u_dmem.q_addr0`), but never as the critical path. | **Refuted** |
+
+**Prediction 1 is explicitly refuted.**  The forwarding datapath is *not* the
+bottleneck.  The real critical path in the forwarding configuration is
+
+> data-memory bank output register -> LUT -> (dmem output mux / EX/MEM address
+> adder) -> `id_ex_valid` / `stop_fetch` -> the PC register's clock enable.
+
+Two structural facts explain this, and both are visible in the netlist:
+
+* The dmem output register (`even_q` / `odd_q`) is *not* isolated from the
+  rest of the design.  `dmem.vhd` reads the bank unconditionally
+  (`if a < RAM_BYTES then even_q <= even_bank(idx);`) so that the tool can merge
+  the read register into the block RAM's output register, but the same
+  `q_addr0` / `q_load_type` registers are then consumed by the *next* MEM
+  instruction's address and type, and the bank output bits feed the
+  `ex_mem_addr` cone.  The result is a combinational chain that crosses the
+  dmem/EX boundary.
+* The PC update is a priority mux (`redirect` > `HALT` > `stall` > `stop_fetch`
+  > `+1`, `minicpu16_core.vhd:506-517`) whose *clock enable* is computed from
+  `stop_fetch`, which is itself derived from `id_ex_valid` and the reset.  So
+  the "control" cone of the hazard/valid logic terminates on the PC register's
+  enable pin, which makes it a timing endpoint even though it carries no data.
+
+The 5A-era prediction 1 in section 7 above ("forwarded operand -> branch
+comparator -> next-PC mux -> instruction BRAM address") is refuted for the same
+reason: the branch comparator and the BRAM address are not on the path.
+
+Measured Fmax per configuration and seed (lower-bound estimate, untuned):
+
+| Configuration | Device | seed 1 | seed 2 | seed 3 | geometric mean |
+|---|---|---:|---:|---:|---:|
+| `FORWARDING=true` | HX8K (ct256) | 43.33 | 43.38 | 44.54 | **43.75 MHz** |
+| `FORWARDING=true` | UP5K (sg48) | 18.07 | 17.78 | 18.74 | **18.19 MHz** |
+| `FORWARDING=false` | HX8K (ct256) | 55.59 | 63.92 | 62.22 | **60.47 MHz** |
+| `FORWARDING=false` | UP5K (sg48) | 25.34 | 24.94 | 25.54 | **25.27 MHz** |
+
+Per-seed critical-path identity (all six runs, seed 1 shown; the identity is
+the same across the three seeds):
+
+| Configuration | Device | Critical path startpoint | Endpoint |
+|---|---|---|---|
+| `FORWARDING=true` | HX8K | `u.u_dmem.odd_bank.0.0_RAM.RDATA_3` (dmem odd bank) | `pc_out_s` register clock enable |
+| `FORWARDING=true` | UP5K | `u.id_ex_ctrl_SB_DFFESR_Q_9_DFFLC.O` (ID/EX control) -> `u.u_forward.ex_reg_write` -> `u.ex_mem_store_data` -> `u.ex_mem_addr` adder | `pc_out_s` register clock enable |
+| `FORWARDING=false` | HX8K | `u.u_imem.:471.0.15_RAM.RDATA_11` (imem BRAM) -> decode -> `u.u_hazard.ex_reg_write` | `u.if_id_pc` register clock enable |
+| `FORWARDING=false` | UP5K | `u.b_ex` (EX operand B) -> `u.ex_mem_result` 16-bit adder (carry chain) | `u.if_id_pc` register clock enable |
+
+The `FORWARDING=true` build is slower than `FORWARDING=false` in this flow
+(28.21 MHz vs 39.09 MHz geometric mean over all devices and seeds).  This is
+finding **F30**: the forwarding build uses ~112 more LUT4 (1369 vs 1257), and
+in an untuned, unconstrained, flat placement that is enough to move the
+critical path onto a longer cone.  It is a placement artefact of this flow,
+**not** a hardware comparison of the two microarchitectures, and no timing
+optimisation was attempted (Fmax tuning is a non-goal for this phase).
 
 ## 10. Post-synthesis simulation (optional)
 

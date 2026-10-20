@@ -122,10 +122,13 @@ def ghdl_prefix(ghdl: str) -> Optional[str]:
 
 
 def find_plugin() -> Optional[str]:
+    # The permanent local install is preferred; /tmp is only a fallback because
+    # it is wiped on reboot.  GHDL_YOSYS_PLUGIN overrides everything.
     cands = [
         os.environ.get("GHDL_YOSYS_PLUGIN"),
-        "/tmp/ghdl-yosys-plugin/ghdl.so",
+        str(Path.home() / "tools" / "ghdl-yosys-plugin" / "ghdl.so"),
         str(Path.home() / ".local" / "lib" / "yosys" / "ghdl.so"),
+        "/tmp/ghdl-yosys-plugin/ghdl.so",
     ]
     for c in cands:
         if c and Path(c).is_file():

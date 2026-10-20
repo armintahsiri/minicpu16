@@ -59,9 +59,12 @@ RTL_FILES = [
     "tb/cpu_tb.vhd",
 ]
 
+# Search order for the second simulator, kept in step with the Makefile:
+# the permanent local install under $HOME/tools first, then PATH (what CI
+# uses), and only then the ephemeral /tmp copy.
 GHDL_CANDIDATES = [
-    "ghdl",
     str(Path.home() / "tools" / "ghdl" / "bin" / "ghdl"),
+    "ghdl",
     "/tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl",
 ]
 

@@ -144,15 +144,32 @@ class Gen:
         self.emit("%s %s, %s, %s" % (self.rng.choice(ALU_R), cons, rd, other))
         self.hazards.add("dep_d%d" % distance)
 
-    def store_load(self, distance: int, size: str) -> None:
-        # Even address guarantees that SB/LB/LW see the same effective address.
-        addr = self.addr(align=True)
+    def store_load(self, distance: int, size: Optional[str] = None,
+                   load: Optional[str] = None, odd: Optional[bool] = None) -> None:
+        """A store and a later load of the SAME address, `distance` apart.
+
+        `distance` counts the retired instructions between the store and the
+        load, so distance 1 means they are back-to-back.  The store/load size
+        pair and the address parity are seed-driven so that the
+        store_load_d1/d2/d3 coverage counters are reached from every
+        byte/word/misaligned combination, not only from the even-aligned word
+        case.
+        """
+        if size is None:
+            size = self.rng.choice(("sb", "sw"))
+        if load is None:
+            load = "lw" if size == "sw" else self.rng.choice(("lb", "lbu"))
+        if odd is None:
+            odd = self.rng.randrange(2) == 1
+        # An odd address makes the word accesses misaligned (ISA.md section 7.1
+        # aligns LW/SW down with & 0xFFFE), which is a different case from the
+        # even-aligned one and is counted separately.
+        addr = self.addr(align=not odd)
         base, val, dst = self.distinct_regs(3)
         self.emit("li %s, 0x%04X" % (base, addr))
         self.emit("li %s, 0x%04X" % (val, self.rng.randrange(0x10000)))
         self.emit("%s %s, 0(%s)" % (size, val, base))
-        self.filler(distance - 1, exclude=(base, val, dst))
-        load = "lw" if size == "sw" else self.rng.choice(["lb", "lbu"])
+        self.filler(max(0, distance - 1), exclude=(base, val, dst))
         self.emit("%s %s, 0(%s)" % (load, dst, base))
         self.hazards.add("store_load_same_addr")
 
@@ -506,11 +523,38 @@ class Gen:
         self.emit("sw %s, 0(%s)" % (p1, base))
         self.emit("lw %s, 0(%s)" % (p1, base))
         self.emit("lw %s, 0(%s)" % (p2, p1))
-        # HALT after a load.
+        # HALT after a load.  The HALT itself is emitted by fwd(), after every
+        # other template, so that it really is the last instruction and the
+        # templates that follow it are not dead code.
         base, ld = self.distinct_regs(2)
         self.emit("li %s, 0x%04X" % (base, self.addr()))
         self.emit("lw %s, 0(%s)" % (ld, base))
-        self.emit("halt")
+        # A load whose destination is R0: the value is discarded and the
+        # register file must ignore the write (the load_r0 counter).
+        base, ld2 = self.distinct_regs(2)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw r0, 0(%s)" % base)
+        # A not-taken conditional branch (the branch_not_taken counter).  The
+        # two operands are made different so the branch is really not taken.
+        a, b = self.distinct_regs(2)
+        lab = self.label("Lnottaken")
+        self.emit("li %s, %d" % (a, self.rng.randrange(1, 100)))
+        self.emit("li %s, %d" % (b, self.rng.randrange(101, 200)))
+        self.emit("beq %s, %s, %s" % (a, b, lab))
+        self.place(lab)
+        # MMIO writes: GPIO_OUT and UART_TX.  The second UART_TX write lands
+        # while the transmitter is still busy, so it is dropped by the
+        # hardware (the uart_drop counter).
+        addr_r, val_r, out_r = self.distinct_regs(3)
+        self.emit("li %s, GPIO_OUT" % addr_r)
+        self.emit("li %s, 0x%04X" % (val_r, self.rng.randrange(0x10000)))
+        self.emit("sw %s, 0(%s)" % (val_r, addr_r))
+        self.emit("lw %s, 0(%s)" % (out_r, addr_r))
+        self.emit("li %s, UART_TX" % addr_r)
+        self.emit("li %s, 0x%04X" % (val_r, self.rng.randrange(1, 0x100)))
+        self.emit("sw %s, 0(%s)" % (val_r, addr_r))
+        self.emit("li %s, 0x%04X" % (val_r, self.rng.randrange(1, 0x100)))
+        self.emit("sw %s, 0(%s)" % (val_r, addr_r))
 
     def coverage(self) -> None:
         # One executed instance of every assigned opcode, with seed-driven
@@ -553,6 +597,38 @@ class Gen:
         for _ in range(self.rng.randrange(6, 11)):
             self.fwd_scenario()
         self.fwd_specials()
+        # The forwarding run is the one the Step 1c thresholds are checked
+        # against, so the store->load distances must be present here too, not
+        # only in the general six-mode run.
+        self.store_load_mode()
+        # HALT is last, so that everything above it is really executed.
+        self.emit("halt")
+
+    def store_load_mode(self) -> None:
+        """Store -> load of the same address, at every distance and size pair.
+
+        The Phase 5B Step 1c requirement is that the store_load_d1/d2/d3
+        coverage counters are each reached at least 50 times from RANDOM
+        programs only.  A dedicated mode guarantees the distances and the
+        byte/word/misaligned combinations instead of leaving them to chance.
+        """
+        # Every distance 1..4 is exercised at least once, in a seed-shuffled
+        # order, so a single seed always covers the whole distance range.
+        distances = [1, 2, 3, 4]
+        self.rng.shuffle(distances)
+        for d in distances:
+            self.store_load(d)
+            if self.rng.randrange(2):
+                self.filler(self.rng.randrange(1, 3))
+        # A second wave with the size/load combination and the address parity
+        # chosen by the seed, so different seeds exercise different
+        # combinations (SB/LB, SB/LBU, SW/LW, SW/LB; even and odd addresses).
+        for _ in range(self.rng.randrange(3, 7)):
+            size = self.rng.choice(("sb", "sw"))
+            load = self.rng.choice(("lb", "lbu", "lw"))
+            odd = self.rng.randrange(2) == 1
+            self.store_load(self.rng.choice((1, 2, 3, 4)),
+                            size=size, load=load, odd=odd)
 
     def append_functions(self) -> None:
         for name, body in self.funcs:
@@ -586,6 +662,8 @@ def generate(seed: int, mode: Optional[str] = None) -> Generated:
         g.mmio_writes()
     elif mode == "fwd":
         g.fwd()
+    elif mode == "store_load":
+        g.store_load_mode()
     elif mode == "coverage":
         g.coverage()
     else:

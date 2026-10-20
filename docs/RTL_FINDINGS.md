@@ -414,6 +414,128 @@ therefore detects a real forwarding bug in the post-synthesis logic.
 
 ---
 
+## F32. A hand-computed expectation was wrong; the RTL was right
+
+**Symptom.** The first full-suite runs (`build_suite_full_nvc.log` and
+`build_suite_full_ghdl.log`, both simulators) reported one failure:
+
+```
+FAIL dir_j_load_store_addr_d1     nvc   cycles=13     (gold 13    ) stalls=1     trace=8/8
+  expected: ram[0x0007]: got 0000 want 5500
+```
+
+The directed test `tests/directed/j_load_store_addr_d1.asm` is:
+
+```
+0: li   r1, 0x0100
+1: li   r2, 0x0007
+2: sw   r2, 0(r1)      ; store 0x0007
+3: li   r4, 0x0055
+4: lw   r3, 0(r1)      ; r3 = 0x0007
+5: sw   r4, 0(r3)      ; store 0x0055
+6: lw   r5, 0(r3)
+7: halt
+```
+
+**Hand derivation (from `docs/ISA.md` section 7.1 only, before looking at the
+RTL or the model).**  ISA.md says:
+
+> `LW`/`SW` use `byteaddr & 0xFFFE`; **address bit 0 is ignored**, there is no
+> misalignment trap and no exception.
+
+Walking the program:
+
+| instr | operation | `byteaddr` | effective word address | effect |
+|---|---|---|---|---|
+| 2 | `sw r2, 0(r1)` | `0x0100 + 0 = 0x0100` | `0x0100 & 0xFFFE = 0x0100` | RAM[0x0100] = 0x0007 |
+| 4 | `lw r3, 0(r1)` | `0x0100 + 0 = 0x0100` | `0x0100 & 0xFFFE = 0x0100` | r3 = 0x0007 |
+| 5 | `sw r4, 0(r3)` | `0x0007 + 0 = 0x0007` | `0x0007 & 0xFFFE = **0x0006**` | RAM[0x0006] = 0x0055 |
+| 6 | `lw r5, 0(r3)` | `0x0007 + 0 = 0x0007` | `0x0007 & 0xFFFE = **0x0006**` | r5 = 0x0055 |
+
+So the correct final state is `ram 0100 0700` and **`ram 0006 5500`**.  The
+hand-written expectation that said `ram 0007 5500` contradicted ISA.md: it
+forgot that bit 0 of a `SW`/`LW` address is ignored, so the word lands at the
+*even* address 0x0006, not at 0x0007.
+
+**Classification: wrong expectation, RTL correct.**  The RTL wrote 0x0055 at
+0x0006 and read it back as r5 = 0x0055 — exactly what ISA.md prescribes.  The
+model agreed with the RTL (the suite compares against the model too, and the
+model's own trace matched).  Only the hand-written `.expected` file was wrong.
+
+**Fix.**  `tests/directed/j_load_store_addr_d1.expected` now states
+`ram 0006 5500`, the value the hand derivation above produces.  **No RTL, no
+model and no ISA change was made** — the expected value was corrected *to* the
+specification, not the other way round.  The test is the regression: it now
+passes on NVC and GHDL and would fail again if the RTL ever stopped aligning
+`SW`/`LW` addresses down.
+
+**Note on the log.**  The two failing logs are the pre-5B-commit runs; the
+corrected expectation is in commit `03a4cd0` and every suite run since then
+(`build_suite_5b_full.log`, `build_rtl_test_full.log`) reports 0 failures.
+
+---
+
+## F33. The predicted critical path was wrong: forwarding is not the bottleneck
+
+**Claim under test.**  `docs/RTL_ARCH.md` section 9 predicted, for the
+forwarding configuration, that the longest combinational path would be
+
+> forwarding mux -> ALU -> branch/target adder -> PC
+
+and section 7 predicted the same family of path for the 5A configuration.
+
+**Measurement.**  `tools/synth_smoke.py` (Yosys 0.70 `synth_ice40` +
+nextpnr-ice40, unconstrained placement, target 50 MHz, seeds 1-3, no tuning)
+was re-run for both configurations, both devices, all three seeds.  The
+critical paths were read from the nextpnr JSON report and each hop was mapped
+back to the RTL through the Yosys netlist `hdlname` attributes.
+
+**Finding.**  The prediction is **refuted**.  In all six `FORWARDING=true`
+runs the critical path does **not** contain the forwarding mux, the ALU
+operand mux, the branch comparator, the target adder or the PC adder.  The
+`u_forward` instance appears exactly once, in the UP5K path, and only as the
+*control* input `u.u_forward.ex_reg_write` — the hazard/valid compare — not as
+a forwarded operand.
+
+The real critical path in the forwarding configuration is:
+
+> dmem bank output register -> LUT -> dmem output mux / EX/MEM address adder
+> -> `id_ex_valid` / `stop_fetch` -> the PC register's clock enable.
+
+Two structural causes, both visible in the netlist:
+
+1. `dmem.vhd` reads the bank unconditionally
+   (`if a < RAM_BYTES then even_q <= even_bank(idx);`) so the tool can merge the
+   read register into the block RAM's output register.  The consequence is that
+   the bank output bits and the `q_addr0` / `q_load_type` registers feed the
+   *next* MEM instruction's address cone, so the chain crosses the dmem/EX
+   boundary instead of stopping at a register.
+2. The PC update is a priority mux (`redirect` > `HALT` > `stall` >
+   `stop_fetch` > `+1`, `minicpu16_core.vhd:506-517`) whose *clock enable* is
+   computed from `stop_fetch`, which is derived from `id_ex_valid` and the
+   reset.  The hazard/valid control cone therefore terminates on a register
+   enable pin, which is a timing endpoint even though it carries no data.
+
+**Consequence.**  The forwarding datapath is not the reason the forwarding
+build is slower in this flow.  The forwarding build uses ~112 more LUT4
+(1369 vs 1257) and, in an untuned flat placement, that extra logic is what
+moves the critical path onto the longer dmem-to-PC-enable cone.  This sharpens
+F30: the `FORWARDING=true` Fmax deficit (43.75 vs 60.47 MHz geometric mean on
+HX8K) is a *placement* effect of extra combinational logic, not a measurement
+of the forwarding path itself.
+
+**Fix / action.**  Documentation only.  `docs/RTL_ARCH.md` section 9.1 now
+carries the full prediction-versus-measurement table with an explicit
+"prediction 1: **refuted**" verdict, and section 7 carries a pointer to it.
+**No RTL change was made** and no timing tuning was attempted (Fmax tuning is a
+non-goal for this phase).
+
+**Not verified.**  This is a flat, unconstrained, single-FPGA-family estimate.
+It says nothing about a real ASIC or FPGA flow, and the absolute numbers are
+not sign-off numbers.
+
+---
+
 ## Contract/model changes in Phase 5B
 
 Phase 5B amended the contract and timing layer in exactly the Step-2 peripheral

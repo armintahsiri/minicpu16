@@ -119,10 +119,19 @@ MUTATIONS: List[Mutation] = [
         "id": 8,
         "name": "misaligned LW uses the next word instead of aligning down",
         "file": "dmem.vhd",
+        # Only the READ path is broken: a misaligned load takes the next word
+        # instead of the aligned-down one.  The write path is left alone, so
+        # the mutation is a pure read-side bug and is caught by any test that
+        # loads a misaligned address and checks the value (a_misaligned) as
+        # well as by a test that stores and reloads a misaligned address
+        # (j_load_store_addr_d1, finding F32).
         "edits": [
-            ("idx := a / 2;", "idx := (a + 1) / 2;"),
+            ("      if a < RAM_BYTES then\n        even_q <= even_bank(idx);",
+             "      if a < RAM_BYTES then\n        even_q <= even_bank((a + 1) / 2);"),
+            ("      if a < RAM_BYTES then\n        odd_q <= odd_bank(idx);",
+             "      if a < RAM_BYTES then\n        odd_q <= odd_bank((a + 1) / 2);"),
         ],
-        "tests": [directed("a_misaligned")],
+        "tests": [directed("a_misaligned"), directed("j_load_store_addr_d1")],
     },
     {
         "id": 9,

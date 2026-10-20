@@ -19,13 +19,25 @@
 #   make bench       print the benchmark table and regenerate docs/BENCHMARKS.md
 #   make clean       remove build/, work/ and __pycache__
 #
-# GHDL is the second simulator.  The default below finds it on PATH (CI) and
-# otherwise uses the official 6.0.0 LLVM archive in /tmp (this machine).
+# GHDL is the second simulator.  The search order is deliberately stable so a
+# rebuild works on a fresh machine:
+#
+#   1. an explicit "make GHDL=/path/to/ghdl"
+#   2. $(HOME)/tools/ghdl/bin/ghdl   (the permanent local install)
+#   3. ghdl on PATH                  (what CI uses)
+#   4. /tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl  (ephemeral fallback)
+#
+# /tmp is only a fallback: it is wiped on reboot, so a build that depends on it
+# silently breaks.  If no GHDL is found, the check below fails loudly instead of
+# producing a confusing "ghdl: command not found" halfway through a run.
 # Override with: make GHDL=/path/to/ghdl test
 
 NVC       ?= nvc
-GHDL_BUNDLED := /tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl
-GHDL      ?= $(shell command -v ghdl 2>/dev/null || (test -x $(GHDL_BUNDLED) && echo $(GHDL_BUNDLED)) || echo ghdl)
+GHDL_HOME ?= $(HOME)/tools/ghdl
+GHDL_TMP  := /tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl
+GHDL      ?= $(shell test -x $(GHDL_HOME)/bin/ghdl && echo $(GHDL_HOME)/bin/ghdl || \
+                       (command -v ghdl 2>/dev/null) || \
+                       (test -x $(GHDL_TMP) && echo $(GHDL_TMP)))
 STD       := --std=08
 BUILD     := build
 NVC_DIR   := $(BUILD)/nvc
@@ -36,7 +48,22 @@ PY        := python3
 
 all: test
 
-test: consistency vhdl-check asmtest simtest programstest gentest bench-check       diversity rtl-leaf rtl-suite-quick rtl-fuzz-quick fwd-regression
+# Fail loudly and early if the second simulator is missing.  A silent fallback
+# to a non-existent "ghdl" would only surface as a confusing error later.
+check-ghdl:
+	@if [ -z "$(GHDL)" ]; then \
+	  echo "ERROR: no GHDL found." >&2; \
+	  echo "  Looked for, in order:" >&2; \
+	  echo "    1. an explicit override:  make GHDL=/path/to/ghdl <target>" >&2; \
+	  echo "    2. \$$HOME/tools/ghdl/bin/ghdl   (preferred local install)" >&2; \
+	  echo "    3. ghdl on PATH                  (CI uses the distro package)" >&2; \
+	  echo "    4. $(GHDL_TMP) (ephemeral fallback)" >&2; \
+	  echo "  Install it under \$$HOME/tools/ghdl, or put it on PATH." >&2; \
+	  exit 1; \
+	fi
+	@echo "GHDL: $(GHDL)"
+
+test: check-ghdl consistency vhdl-check asmtest simtest programstest gentest bench-check       diversity rtl-leaf rtl-suite-quick rtl-fuzz-quick fwd-regression
 	@echo ""
 	@echo "==================================================="
 	@echo "  ALL MINICPU-16 PHASE 5B QUICK CHECKS PASSED"
@@ -87,30 +114,33 @@ diversity:
 bench:
 	@$(PY) tools/bench.py
 
-rtl-leaf:
+rtl-leaf: check-ghdl
 	@echo "=== leaf RTL testbenches: NVC and GHDL ==="
 	@$(PY) tools/rtl_leaf_tests.py --sim both --workdir $(BUILD)/rtl_leaf
 
-rtl-suite:
+rtl-suite: check-ghdl
 	@echo "=== full cycle-exact differential suite: both simulators ==="
 	@$(PY) tools/rtl_suite.py --sim both --uart-cycle-tests --workdir $(BUILD)/rtl_suite
 
-rtl-suite-quick:
+rtl-suite-quick: check-ghdl
 	@echo "=== quick cycle-exact differential suite: NVC and GHDL ==="
 	@$(PY) tools/rtl_suite.py --sim both --quick --workdir $(BUILD)/rtl_suite_quick
 
-rtl-fuzz-quick:
+rtl-fuzz-quick: check-ghdl
 	@echo "=== quick cycle-exact fuzz (40 random incl. fwd, NVC; 8 GHDL) ==="
 	@$(PY) tools/rtl_fuzz.py --n 40 --quick --sim nvc --ghdl-subset 8 \
 	    --check-cycles --forwarding --workdir $(BUILD)/rtl_fuzz_quick
 
-rtl-fuzz:
+# The coverage thresholds are NOT disabled here: the full forwarding run must
+# prove that every counter is reached from RANDOM programs only, and that
+# store_load_d1/d2/d3 each reach 50.  See docs/PHASE_5B_REPORT.fa.md section 7.
+rtl-fuzz: check-ghdl
 	@echo "=== full forwarding-targeted fuzz: 1000 NVC, 150 GHDL, cycle-exact ==="
 	@$(PY) tools/rtl_fuzz.py --n 1000 --mode fwd --sim nvc --ghdl-subset 150 \
-	    --check-cycles --forwarding --no-cov-assert \
+	    --check-cycles --forwarding \
 	    --workdir $(BUILD)/rtl_fuzz
 
-rtl-fuzz-general:
+rtl-fuzz-general: check-ghdl
 	@echo "=== general six-mode fuzz: 300 NVC, 100 GHDL, cycle-exact ==="
 	@$(PY) tools/rtl_fuzz.py --n 300 --sim nvc --ghdl-subset 100 \
 	    --check-cycles --forwarding --workdir $(BUILD)/rtl_fuzz_general
@@ -123,7 +153,7 @@ fwd-regression:
 rtl-test: rtl-leaf rtl-suite
 	@echo "RTL full differential test complete"
 
-mutation:
+mutation: check-ghdl
 	@echo "=== mutation check: directed + fuzz-only, NVC and GHDL ==="
 	@$(PY) tools/mutation_check.py --corpus 36 --ghdl-corpus 12 --check-cycles \
 	    --forwarding --json $(BUILD)/mutation.json --workdir $(BUILD)/mutation
@@ -134,7 +164,7 @@ synth-smoke:
 
 postsynth-sim:
 	@echo "=== post-synthesis gate-level simulation (step 10, optional) ==="
-	@$(PY) tools/postsynth_sim.py --program tests/directed/l_postsynth.asm 	     --forwarding true --cycles 60 --build $(BUILD)/postsynth
+	@$(PY) tools/postsynth_sim.py --forwarding true --build $(BUILD)/postsynth
 
 clean:
 	@rm -rf $(BUILD) work

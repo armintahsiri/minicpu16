@@ -32,7 +32,8 @@ import random_programs  # noqa: E402
 import rtl_run  # noqa: E402
 import trace_diff  # noqa: E402
 
-MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd"]
+MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd",
+         "store_load"]
 
 # Curated programs guarantee that every coverage counter is exercised even when
 # a small quick run is used.  main is called by crt0; halt ends the run.
