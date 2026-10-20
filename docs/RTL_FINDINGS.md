@@ -401,14 +401,52 @@ the open simulation model / Yosys `sim` parameter handling, not of the RTL.
 **Choice.** `postsynth_sim.py` therefore maps the design with generic
 technology mapping (`proc; opt; memory; opt; techmap; opt`), which keeps the
 memories as initialized flip-flop logic, and runs the gate-level logic through
-Yosys `sim`.  It asserts the architectural result (GPIO_OUT and HALT) and
-reports, but does not assert, `pc_out` — that is the internal fetch pointer,
-whose frozen value after HALT is unspecified (F3).
+Yosys `sim`.
 
-**Non-vacuity.** With mutation 16 applied to a scratch copy of the RTL (disable
-forwarding to operand B), the gate-level GPIO_OUT reads 0x0000 instead of the
-golden 0x0026 and the tool fails; on the committed RTL it passes.  The check
-therefore detects a real forwarding bug in the post-synthesis logic.
+**What the gate-level run compares (Phase 5B, T5).**  Three programs are run
+(`j_double_producer`, `j_load_store_addr_d1`, `j_load_branch_d1`); together
+they cover ALU forwarding, the load-use stall, a store whose address comes
+from a load (the F32 case) and a taken branch that flushes the pipeline.  For
+each program the tool reconstructs, from the VCD:
+
+* the **full retirement trace**, record by record: pc, instruction word, rd,
+  written value, memory kind/address/size/data, branch taken and target — and
+  the retire *cycle* column as well;
+* the **per-cycle pipeview**: the occupancy and PC of all four pipeline
+  stages, plus the stall and flush flags.
+
+Both are compared against the golden timing layer's own output
+(`isa_sim.run_pipeline`) with the same rule the RTL runner uses for the
+pipeview (a stale PC in an empty stage is not significant).  The final
+GPIO_OUT and the HALT are compared as well, and the run fails if anything
+retires after the HALT.
+
+The retire cycle *is* recoverable at gate level: the generic-mapped netlist
+still carries the core's architectural cycle counter (`cycle_count`), which is
+cleared by reset and incremented once per non-reset clock.  The RTL
+testbench numbers the first cycle after reset release as cycle 1, which is
+exactly the cycle in which the counter still reads 0, so the gate-level cycle
+number of a sample is `cycle_count + 1`.  The gate-level run is therefore
+**cycle-exact**; the earlier note that only the retire *order* could be
+compared is superseded.
+
+Not compared: `pc_out` (the internal fetch pointer — its frozen value after
+HALT is unspecified, F3; it is reported only) and the final RAM contents
+(the stores are compared through the retirement trace instead, which is what
+the RTL testbench itself asserts).
+
+**Non-vacuity.** With mutation 16 applied to a scratch copy of the RTL
+(disable forwarding to operand B), all three programs fail: the retirement
+trace diverges in the *data* fields (e.g. a load returns 0x0000 instead of
+0x0007) while the retire cycles still agree, so the check isolates the value
+error from a timing error.  On the committed RTL all three pass.
+
+**Toolchain note.** The `ghdl-yosys-plugin` binary links against
+`libghdl-6_0_0.dylib` through an `@rpath` that pointed at a `/tmp` directory
+which no longer exists.  The rpath was extended with the permanent
+`$HOME/tools/ghdl/lib` directory, and `postsynth_sim.py` additionally sets
+`DYLD_FALLBACK_LIBRARY_PATH` (`LD_LIBRARY_PATH` elsewhere) to the library
+directory of the GHDL it uses, so the plugin loads without any manual step.
 
 **Status.** Optional Step 10, run manually; not part of `make test`.
 
