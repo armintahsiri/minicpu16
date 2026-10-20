@@ -42,6 +42,7 @@ def metrics(program, img, res) -> dict:
         "taken_pct": 100.0 * taken / len(branches) if branches else 0.0,
         "stalls": res.stalls,
         "counts": mix,
+        "R": taken + mix.get("jump", 0),
     }
 
 
@@ -95,18 +96,39 @@ def render(rows: List[dict]) -> str:
             c.get("branch", 0), c.get("jump", 0), c.get("halt", 0) + c.get("nop", 0),
             r["branches"], r["taken"]))
     lines.append("")
-    lines.append("## What this implies for Phase 5")
+    lines.append("## Cycle exactness and composition (Phase 5B)")
+    lines.append("")
+    lines.append("Every row above satisfies `cycles = N + 4 + S + 2R` exactly, with `R` the")
+    lines.append("taken conditional branches plus JAL plus JALR, and the RTL with")
+    lines.append("`FORWARDING=true` reproduces the same cycle counts (verified by")
+    lines.append("`tools/rtl_suite.py` and `tools/rtl_run.py`, not asserted).")
+    lines.append("")
+    lines.append("| Program | N | Cycles | S | R | 2R |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for r in rows:
+        lines.append("| %s | %d | %d | %d | %d | %d |" % (
+            r["name"], r["instructions"], r["cycles"], r["stalls"], r["R"], 2 * r["R"]))
+    lines.append("")
+    lines.append("## What this implies")
     lines.append("")
     lines.append("* The kernel-style programs (matmul, bubble_sort, muldiv) are dominated by")
     lines.append("  ALU and branch work; the load/store share is significant in matmul and")
     lines.append("  bubble_sort, so the load-use rule and forwarding paths are the first things")
     lines.append("  to verify against RTL.")
-    lines.append("* hello is UART-bound, not CPU-bound; its CPI is dominated by the busy-poll")
-    lines.append("  loop and the 10-cycle UART model.")
+    lines.append("* **Control transfers dominate the lost cycles**: they are 99.9% of matmul's")
+    lines.append("  overhead above `N` and 99.1% of muldiv's.  Load-use stalls matter only in")
+    lines.append("  the load-heavy integer programs (memory_ops 30.5%, hello 39.9%,")
+    lines.append("  bubble_sort 17.9% of the program's own overhead).")
+    lines.append("* hello is UART-bound in the golden model (its busy-poll loop and the 10-cycle")
+    lines.append("  UART), not ALU-bound; its 57 load-use stalls are the polling reads.")
     lines.append("* switch and funcptr are short control-flow tests, useful as first")
     lines.append("  retirement-trace vectors rather than as performance benchmarks.")
-    lines.append("* A future MUL instruction would target matmul and muldiv; measure before")
-    lines.append("  adding it, and keep the reserved opcode space.")
+    lines.append("* Software multiply/divide is very expensive where used: 38.8% of")
+    lines.append("  factorial_rec's cycles and 69.1% of muldiv's are in")
+    lines.append("  `programs/runtime/arith.s`.  A future MUL instruction would target those")
+    lines.append("  two; measure before adding it, and keep the reserved opcode space.")
+    lines.append("* Full details and explicitly-unverified what-if estimates are in")
+    lines.append("  <code>docs/OPTIMIZATION_DATA.md</code>.")
     lines.append("")
     return "\n".join(lines)
 

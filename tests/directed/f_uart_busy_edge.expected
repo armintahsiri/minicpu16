@@ -1,0 +1,8 @@
+pc 0011
+instructions 18
+cycles 22
+reg 12 0001
+reg 13 0000
+ram 0100 0100
+ram 0102 0000
+

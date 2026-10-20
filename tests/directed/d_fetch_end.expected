@@ -2,3 +2,4 @@ pc 0002
 instructions 3
 reg 1 1234
 reg 2 0001
+cycles 7

@@ -1,0 +1,5 @@
+pc 0004
+instructions 5
+cycles 9
+reg 6 0005
+ram 0100 0500

@@ -1,0 +1,6 @@
+pc 0003
+instructions 4
+cycles 8
+reg 0 0000
+reg 1 0005
+reg 2 0005

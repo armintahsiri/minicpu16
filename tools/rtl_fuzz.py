@@ -15,7 +15,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -30,7 +32,7 @@ import random_programs  # noqa: E402
 import rtl_run  # noqa: E402
 import trace_diff  # noqa: E402
 
-MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes"]
+MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd"]
 
 # Curated programs guarantee that every coverage counter is exercised even when
 # a small quick run is used.  main is called by crt0; halt ends the run.
@@ -188,6 +190,12 @@ COV_KEYS = [
     "lbu_odd", "sw", "lw", "load_r0", "uart_drop", "misaligned",
     "mmio_read", "mmio_write", "branch_taken", "branch_not_taken", "jal",
     "jalr", "halt",
+    # Phase 5B forwarding coverage (RTL counters).
+    "fwd_exmem_a", "fwd_exmem_b", "fwd_memwb_a", "fwd_memwb_b",
+    "fwd_branch", "fwd_store_data", "fwd_store_addr", "fwd_jalr_base",
+    "fwd_priority", "fwd_r0_source", "stall_lu_alu", "stall_lu_store_data",
+    "stall_lu_store_addr", "stall_lu_branch", "stall_lu_jalr",
+    "stall_near_flush", "fwd_lb_sext", "fwd_link", "fwd_from_bubble",
 ]
 
 
@@ -241,18 +249,70 @@ def add_core_cov(c: Dict[str, int], cov: Sequence[int]) -> None:
         "stall_store_data", "flush", "halt_shadow", "load_r0", "uart_drop",
         "misaligned", "mmio_read", "mmio_write", "stall_load_use",
         "flush_branch", "flush_jump",
+        "fwd_exmem_a", "fwd_exmem_b", "fwd_memwb_a", "fwd_memwb_b",
+        "fwd_branch", "fwd_store_data", "fwd_store_addr", "fwd_jalr_base",
+        "fwd_priority", "fwd_r0_source", "stall_lu_alu", "stall_lu_store_data",
+        "stall_lu_store_addr", "stall_lu_branch", "stall_lu_jalr",
+        "stall_near_flush", "fwd_lb_sext", "fwd_link", "fwd_from_bubble",
     ]
     for i, n in enumerate(names):
         if i < len(cov):
             c[n] += int(cov[i])
 
 
+def normalise(text: str) -> str:
+    out = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            out.append(re.sub(r"\s+", " ", line))
+    return "\n".join(out)
+
+
+def diversity_report(sources, modes) -> Dict[str, object]:
+    from collections import defaultdict
+    per_total = defaultdict(int)
+    per_unique = defaultdict(set)
+    all_h = set()
+    for src, mode in zip(sources, modes):
+        h = hashlib.sha256(normalise(src).encode()).hexdigest()
+        per_total[mode] += 1
+        per_unique[mode].add(h)
+        all_h.add(h)
+    rows = []
+    for mode in sorted(per_total):
+        total = per_total[mode]
+        uniq = len(per_unique[mode])
+        rows.append({"mode": mode, "total": total, "unique": uniq,
+                     "pct": 100.0 * uniq / total if total else 0.0})
+    return {"total": len(sources), "unique": len(all_h),
+            "pct": 100.0 * len(all_h) / len(sources) if sources else 0.0,
+            "per_mode": rows}
+
+
+def check_diversity(rep, min_overall=98.0, min_mode=90.0) -> List[str]:
+    errs = []
+    if rep["pct"] < min_overall:
+        errs.append("overall uniqueness %.1f%% < %.0f%%" % (rep["pct"], min_overall))
+    for row in rep["per_mode"]:
+        if row["total"] and row["pct"] < min_mode:
+            errs.append("mode %s uniqueness %.1f%% < %.0f%%" %
+                        (row["mode"], row["pct"], min_mode))
+    return errs
+
+
+def print_cov(title: str, cov: Dict[str, int]) -> None:
+    print(title)
+    for k in COV_KEYS:
+        print("  %-20s %d" % (k, cov[k]))
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Phase 5A RTL differential fuzzer")
+    p = argparse.ArgumentParser(description="Phase 5B RTL differential fuzzer")
     p.add_argument("--n", type=int, default=300)
     p.add_argument("--seed-base", type=int, default=0)
     p.add_argument("--sim", choices=["nvc", "ghdl"], default="nvc")
-    p.add_argument("--ghdl-subset", type=int, default=50)
+    p.add_argument("--ghdl-subset", type=int, default=100)
     p.add_argument("--quick", action="store_true")
     p.add_argument("--workdir", default=str(ROOT / "build" / "rtl_fuzz"))
     p.add_argument("--max-cycles", type=int, default=50000)
@@ -260,38 +320,70 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--rebuild", action="store_true")
     p.add_argument("--minimize", action="store_true")
     p.add_argument("--stop-on-fail", action="store_true")
+    p.add_argument("--no-cov-assert", action="store_true")
+    p.add_argument("--gpio-schedule", default=None,
+                   help="GPIO_IN cycle/value schedule file shared with the model")
+    p.add_argument("--check-cycles", action="store_true",
+                   help="compare the retire-cycle column too (Phase 5B)")
+    p.add_argument("--mode", choices=MODES, default=None,
+                   help="force one generator mode (default: cycle through MODES)")
+    p.add_argument("--forwarding", dest="forwarding", action="store_true",
+                   default=False, help="run the forwarding configuration")
+    p.add_argument("--no-forwarding", dest="forwarding", action="store_false")
     ns = p.parse_args(argv)
     if ns.quick:
-        ns.n = min(ns.n, 30)
-        ns.ghdl_subset = min(ns.ghdl_subset, 10)
+        ns.n = min(ns.n, 40)
+        ns.ghdl_subset = min(ns.ghdl_subset, 8)
     ghdl = rtl_run.find_ghdl(ns.ghdl)
     workdir = Path(ns.workdir)
     progdir = workdir / "programs"
     progdir.mkdir(parents=True, exist_ok=True)
 
-    cases: List[Tuple[str, Path, int, int]] = []
+    # Deterministic case list: one generated program per seed, mode selected by
+    # the case index exactly as in Phase 5A, plus curated programs.
+    generated: List[Tuple[str, Path, int]] = []
+    gen_sources: List[str] = []
+    gen_modes: List[str] = []
     for i in range(ns.n):
         seed = ns.seed_base + i
-        mode = MODES[i % len(MODES)]
+        mode = ns.mode if ns.mode else MODES[i % len(MODES)]
         gp = random_programs.generate(seed, mode)
         path = progdir / ("seed_%04d_%s.s" % (seed, mode))
         path.write_text(gp.source, encoding="utf-8")
-        uart_cycles = 0 if mode == "mmio_writes" else 10
-        cases.append((("fuzz_%04d_%s" % (seed, mode)), path, uart_cycles, seed))
+        generated.append((("fuzz_%04d_%s" % (seed, mode)), path, 10))
+        gen_sources.append(gp.source)
+        gen_modes.append(mode)
+
+    rep = diversity_report(gen_sources, gen_modes)
+    errs = check_diversity(rep)
+    print("diversity: %d/%d unique (%.1f%%)" % (rep["unique"], rep["total"], rep["pct"]))
+    for row in rep["per_mode"]:
+        print("  %-14s %3d/%3d (%.1f%%)" % (row["mode"], row["unique"],
+                                            row["total"], row["pct"]))
+    if errs:
+        for e in errs:
+            print("DIVERSITY ASSERTION FAILED: " + e)
+        return 1
+
+    cases = list(generated)
     for name, src, uart_cycles in CURATED:
         path = progdir / ("curated_%s.s" % name)
         path.write_text(src, encoding="utf-8")
-        cases.append(("curated_" + name, path, uart_cycles, -1))
+        cases.append(("curated_" + name, path, uart_cycles))
+    random_names = {c[0] for c in generated}
 
     results = []
-    cov = {k: 0 for k in COV_KEYS}
+    cov_all = {k: 0 for k in COV_KEYS}
+    cov_random = {k: 0 for k in COV_KEYS}
     failed = 0
-    for idx, (name, path, uart_cycles, seed) in enumerate(cases):
+    for idx, (name, path, uart_cycles) in enumerate(cases):
         res = rtl_run.run_case(
             [path], name=name, sim=ns.sim, runtime=True,
             workdir=workdir, max_cycles=ns.max_cycles,
             uart_cycles=uart_cycles, expected=None, ghdl=ghdl,
-            rebuild=ns.rebuild)
+            gpio_schedule=Path(ns.gpio_schedule) if ns.gpio_schedule else None,
+            rebuild=ns.rebuild, forwarding=ns.forwarding,
+            ignore_cycles=not ns.check_cycles)
         results.append(res)
         if res.get("error"):
             print("FAIL %-34s %-4s %s" % (name, ns.sim, res["error"]))
@@ -299,10 +391,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             if ns.stop_on_fail:
                 break
             continue
-        add_core_cov(cov, res.get("rtl_cov", []))
-        tc = analyze_trace(Path(res["trace_path"]))
-        for k, v in tc.items():
-            cov[k] += v
+        # Per-case coverage so the random-only table excludes curated cases.
+        case_cov = {k: 0 for k in COV_KEYS}
+        add_core_cov(case_cov, res.get("rtl_cov", []))
+        for k, v in analyze_trace(Path(res["trace_path"])).items():
+            case_cov[k] += v
+        for k, v in case_cov.items():
+            cov_all[k] += v
+            if name in random_names:
+                cov_random[k] += v
         if not res.get("ok"):
             failed += 1
             rtl_run.print_result(res)
@@ -313,7 +410,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 src = Path(res["trace_path"]).parent / f
                 if src.exists():
                     (bad / f).write_text(src.read_text(), encoding="utf-8")
-            print("  failing program saved in %s (seed=%s)" % (bad, seed))
+            print("  failing program saved in %s (case=%s)" % (bad, name))
             if ns.stop_on_fail:
                 break
         else:
@@ -322,29 +419,42 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print()
     print("fuzz: %d cases, %d failed, simulator=%s" % (len(results), failed, ns.sim))
-    print("coverage table:")
-    zero = []
-    for k in COV_KEYS:
-        print("  %-20s %d" % (k, cov[k]))
-        if cov[k] == 0:
-            zero.append(k)
-    if zero:
-        print("COVERAGE GAP: zero counters: %s" % ", ".join(zero))
-        return 1
+    print_cov("coverage table (all cases):", cov_all)
+    print()
+    print_cov("coverage table (random only):", cov_random)
 
-    # Fixed GHDL subset of the same generated programs.
+    # Phase 5B Step 1c: the full run must exercise every counter and the
+    # store->load distance counters from random programs only.
+    if ns.n >= 300 and not ns.no_cov_assert:
+        zero = [k for k in COV_KEYS if cov_random[k] == 0]
+        low = [k for k in COV_KEYS if 0 < cov_random[k] < 20]
+        stores = {k: cov_random[k] for k in
+                  ("store_load_d1", "store_load_d2", "store_load_d3")}
+        low_stores = [k for k, v in stores.items() if v < 50]
+        if zero or low or low_stores:
+            print("RANDOM-ONLY COVERAGE GAP:")
+            if zero:
+                print("  zero counters: %s" % ", ".join(zero))
+            if low:
+                print("  counters < 20: %s" % ", ".join(
+                    "%s=%d" % (k, cov_random[k]) for k in low))
+            if low_stores:
+                print("  store_load counters < 50: %s" % ", ".join(
+                    "%s=%d" % (k, cov_random[k]) for k in low_stores))
+            return 1
+
     if ns.ghdl_subset > 0 and ns.sim == "nvc":
-        subset = [c for c in cases[:ns.n] if c[3] >= 0]
-        step = max(1, len(subset) // ns.ghdl_subset)
-        subset = subset[::step][:ns.ghdl_subset]
+        subset = generated[::max(1, len(generated) // ns.ghdl_subset)][:ns.ghdl_subset]
         print("GHDL subset: %d programs" % len(subset))
         gfail = 0
-        for name, path, uart_cycles, seed in subset:
+        for name, path, uart_cycles in subset:
             res = rtl_run.run_case(
                 [path], name=name + "_ghdl", sim="ghdl", runtime=True,
                 workdir=workdir, max_cycles=ns.max_cycles,
                 uart_cycles=uart_cycles, expected=None, ghdl=ghdl,
-                rebuild=ns.rebuild)
+            gpio_schedule=Path(ns.gpio_schedule) if ns.gpio_schedule else None,
+                rebuild=ns.rebuild, forwarding=ns.forwarding,
+                ignore_cycles=not ns.check_cycles)
             if not res.get("ok"):
                 gfail += 1
                 rtl_run.print_result(res)
@@ -353,8 +463,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
 
     if ns.minimize:
-        print("minimizer: skipped (not implemented robustly in 5A; failing "
-              "programs and both traces are saved for manual reduction)")
+        print("minimizer: failing programs and both traces are saved for manual reduction")
     return 0 if failed == 0 else 1
 
 

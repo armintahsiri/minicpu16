@@ -13,3 +13,4 @@ reg 10 0000
 reg 11 0000
 gpio 12AB
 uart 41
+cycles 20

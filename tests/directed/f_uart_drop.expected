@@ -4,3 +4,4 @@ reg 1 FF00
 reg 2 0041
 reg 3 0042
 uart 41
+cycles 10

@@ -1,19 +1,21 @@
-# MiniCPU-16 CI (Phase 5A).
+# MiniCPU-16 CI (Phase 5B).
 #
 # This workflow has NOT been executed on GitHub.  It is committed as the intended
 # runner definition and is explicitly unverified.
 #
-# What CI runs: `make test`, the quick suite only.  That includes the Phase 4
-# checks, all leaf RTL testbenches on NVC and GHDL, the quick differential suite
-# (reference traces 01-04, four benchmarks, selected directed tests, 05_mmio and
-# hello excluded as cycle_sensitive) and a 24-program quick fuzz plus 12 curated
-# programs (4 on GHDL).
+# What CI runs: \`make test\`, the quick suite only.  That includes the Phase 4
+# checks, the fuzz-generator diversity assertion, all leaf RTL testbenches, the
+# quick CYCLE-EXACT differential suite on NVC and GHDL (retirement trace
+# including retire cycles, final cycle count and pipeview), a 40-program
+# cycle-exact fuzz (8 of them on GHDL) including the forwarding-targeted mode,
+# and the FORWARDING=false architectural regression subset.
 #
-# What stays local: the full 300-program fuzz (`make rtl-fuzz`), the 12-mutation
-# check (`make mutation`), and synthesis/Fmax (`make synth-smoke`).
+# What stays local (not run by CI): the full 1000-program forwarding fuzz
+# (\`make rtl-fuzz\`), the general 300-program fuzz (\`make rtl-fuzz-general\`), the
+# mutation check (\`make mutation\`), and synthesis/Fmax (\`make synth-smoke\`).
 #
-# Not verified anywhere yet: FORWARDING=true (5B), cycle-exactness against
-# docs/MICROARCH_CONTRACT.md, hardware, and the package/action versions below.
+# Not verified anywhere yet: hardware, post-synthesis simulation, timing
+# sign-off, and the package/action versions below.
 #
 # Package/action notes:
 #   - nickg/setup-nvc@v1 installs NVC; NVC 1.23.0 was used locally.
@@ -30,7 +32,7 @@ on:
 jobs:
   full:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -50,5 +52,5 @@ jobs:
           nvc --version
           ghdl --version
 
-      - name: Quick full suite (Phase 4 + Phase 5A)
+      - name: Quick cycle-exact suite (Phase 4 + Phase 5B)
         run: make test

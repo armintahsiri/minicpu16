@@ -3,3 +3,4 @@ instructions 4
 reg 5 1234
 reg 6 0000
 ram 0100 0000
+cycles 10

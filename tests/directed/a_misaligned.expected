@@ -6,3 +6,4 @@ reg 3 ABCD
 reg 4 FFAB
 reg 5 00CD
 ram 0100 CDAB
+cycles 11

@@ -3,3 +3,4 @@ instructions 4
 reg 1 0001
 reg 6 0000
 reg 7 2222
+cycles 10

@@ -1,0 +1,7 @@
+pc 0004
+instructions 5
+cycles 9
+reg 1 0100
+reg 2 00AB
+reg 3 00AB
+ram 0100 AB00

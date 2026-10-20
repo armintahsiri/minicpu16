@@ -7,3 +7,4 @@ reg 3 1234
 reg 4 0000
 reg 5 0000
 ram 0100 3412
+cycles 18

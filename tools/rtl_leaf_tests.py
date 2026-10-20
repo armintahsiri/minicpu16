@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 RTL = ROOT / "rtl"
@@ -53,6 +53,12 @@ TESTS: List[Tuple[str, str, str]] = [
     ("tb_reset.vhd", "tb_reset", "warm reset preservation and no writes"),
 ]
 
+# Same entity, different generics, so each run gets its own work directory.
+EXTRA_TESTS: List[Tuple[str, str, str, Sequence[str], str]] = [
+    ("tb_reset_midrun.vhd", "tb_reset_midrun", "mid-run reset, 1-cycle", ("-gRESET_LEN=1",), "_len1"),
+    ("tb_reset_midrun.vhd", "tb_reset_midrun", "mid-run reset, 3-cycle", ("-gRESET_LEN=3",), "_len3"),
+]
+
 GHDL_CANDIDATES = [
     "ghdl",
     str(Path.home() / "tools" / "ghdl" / "bin" / "ghdl"),
@@ -78,8 +84,9 @@ def run(cmd: List[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedPr
 
 
 def run_one(sim: str, tb_file: str, entity: str, ghdl: str, workroot: Path,
-            rebuild: bool, rtl_dir: Path = RTL) -> Dict[str, object]:
-    work = workroot / sim / entity
+            rebuild: bool, rtl_dir: Path = RTL,
+            generics: Sequence[str] = (), tag: str = "") -> Dict[str, object]:
+    work = workroot / sim / (entity + tag)
     if rebuild and work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True, exist_ok=True)
@@ -90,7 +97,7 @@ def run_one(sim: str, tb_file: str, entity: str, ghdl: str, workroot: Path,
     if sim == "nvc":
         r = run(["nvc", "--std=08", "-L", ".", "-a"] + [str(f) for f in files], work)
         if r.returncode == 0:
-            r = run(["nvc", "--std=08", "-L", ".", "-e", entity], work)
+            r = run(["nvc", "--std=08", "-L", ".", "-e", entity] + list(generics), work)
         if r.returncode == 0:
             r = run(["nvc", "--std=08", "-L", ".", "-r", entity], work)
     else:
@@ -98,7 +105,7 @@ def run_one(sim: str, tb_file: str, entity: str, ghdl: str, workroot: Path,
         if r.returncode == 0:
             r = run([ghdl, "-e", "--std=08", "--workdir=.", entity], work)
         if r.returncode == 0:
-            r = run([ghdl, "-r", "--std=08", "--workdir=.", entity], work)
+            r = run([ghdl, "-r", "--std=08", "--workdir=.", entity] + list(generics), work)
     elapsed = time.time() - t0
     out = r.stdout
     m = re.search(r"PASS\s+\S+\s+checks=(\d+)", out)
@@ -142,6 +149,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not res["ok"]:
                 failed += 1
                 tail = "\n".join(str(res["output"]).splitlines()[-12:])
+                print(tail)
+    for tf, ent, desc, gens, tag in EXTRA_TESTS:
+        if ns.filter and ns.filter not in ent:
+            continue
+        for sim in sims:
+            try:
+                res = run_one(sim, tf, ent, ghdl, workroot, ns.rebuild,
+                              Path(ns.rtl_dir), gens, tag)
+            except subprocess.TimeoutExpired:
+                res = {"sim": sim, "entity": ent, "ok": False, "checks": 0,
+                       "elapsed_s": 0, "output": "TIMEOUT", "returncode": -1}
+            results.append(res)
+            status = "PASS" if res["ok"] else "FAIL"
+            print("%s %-18s %-4s checks=%-9d %6.2fs  %s" %
+                  (status, ent + tag, sim, res["checks"], res["elapsed_s"], desc))
+            if not res["ok"]:
+                failed += 1
+                tail = "\n".join(str(res["output"]).splitlines()[-14:])
                 print(tail)
     total = sum(int(r["checks"]) for r in results)
     print("leaf testbenches: %d runs, %d failed, %d checks" % (len(results), failed, total))

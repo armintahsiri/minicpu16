@@ -1,11 +1,18 @@
-# MiniCPU-16 build and verification (Phase 5A)
+# MiniCPU-16 build and verification (Phase 5B)
 #
-#   make test        Phase 4 checks + leaf RTL testbenches (NVC and GHDL) +
-#                    quick differential suite + quick fuzz.  Fails loudly.
-#   make rtl-test    leaf testbenches and the full differential suite, both sims
-#   make rtl-fuzz    full 300-program fuzz on NVC + fixed 50-program GHDL subset
-#   make mutation    the 12-mutation verification check
-#   make synth-smoke Yosys/GHDL inference check (time-boxed; needs the plugin)
+#   make test        Phase 4 checks + generator diversity assertion + leaf RTL
+#                    testbenches + quick cycle-exact suite (NVC and GHDL) +
+#                    quick cycle-exact fuzz (incl. 8 GHDL) + FORWARDING=false
+#                    architectural regression.  Fails loudly.
+#   make rtl-test    leaf testbenches and the full cycle-exact suite, both sims
+#                    (references, all benchmarks incl. hello, all directed tests,
+#                    hello at UART 1/10/104)
+#   make rtl-fuzz    full 1000-program forwarding-targeted cycle-exact fuzz on NVC
+#                    plus 150 of the same programs on GHDL
+#   make rtl-fuzz-general
+#                    the general six-mode fuzz (300 NVC + 100 GHDL), cycles checked
+#   make mutation    the mutation check (directed + fuzz-only, NVC + GHDL)
+#   make synth-smoke Yosys/GHDL inference check and nextpnr estimates (time-boxed)
 #   make bench       print the benchmark table and regenerate docs/BENCHMARKS.md
 #   make clean       remove build/, work/ and __pycache__
 #
@@ -22,14 +29,14 @@ NVC_DIR   := $(BUILD)/nvc
 GHDL_DIR  := $(BUILD)/ghdl
 PY        := python3
 
-.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         rtl-fuzz-quick rtl-test rtl-fuzz mutation synth-smoke
+.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         diversity rtl-fuzz rtl-fuzz-quick rtl-fuzz-general rtl-test mutation         synth-smoke fwd-regression
 
 all: test
 
-test: consistency vhdl-check asmtest simtest programstest gentest bench-check       rtl-leaf rtl-suite-quick rtl-fuzz-quick
+test: consistency vhdl-check asmtest simtest programstest gentest bench-check       diversity rtl-leaf rtl-suite-quick rtl-fuzz-quick fwd-regression
 	@echo ""
 	@echo "==================================================="
-	@echo "  ALL MINICPU-16 PHASE 5A CHECKS PASSED"
+	@echo "  ALL MINICPU-16 PHASE 5B QUICK CHECKS PASSED"
 	@echo "==================================================="
 
 consistency:
@@ -70,6 +77,10 @@ bench-check:
 	@$(PY) tools/bench.py --check > $(BUILD)/bench.txt
 	@echo "benchmark assertions OK (table in $(BUILD)/bench.txt)"
 
+diversity:
+	@echo "=== fuzz generator diversity assertion (>=98% overall, >=90% per mode) ==="
+	@$(PY) tools/fuzz_diversity.py --json $(BUILD)/diversity.json
+
 bench:
 	@$(PY) tools/bench.py
 
@@ -78,27 +89,41 @@ rtl-leaf:
 	@$(PY) tools/rtl_leaf_tests.py --sim both --workdir $(BUILD)/rtl_leaf
 
 rtl-suite:
-	@echo "=== full differential suite: reference traces, benchmarks, directed ==="
-	@$(PY) tools/rtl_suite.py --sim both --workdir $(BUILD)/rtl_suite
+	@echo "=== full cycle-exact differential suite: both simulators ==="
+	@$(PY) tools/rtl_suite.py --sim both --uart-cycle-tests --workdir $(BUILD)/rtl_suite
 
 rtl-suite-quick:
-	@echo "=== quick differential suite: NVC and GHDL ==="
+	@echo "=== quick cycle-exact differential suite: NVC and GHDL ==="
 	@$(PY) tools/rtl_suite.py --sim both --quick --workdir $(BUILD)/rtl_suite_quick
 
 rtl-fuzz-quick:
-	@echo "=== quick differential fuzz (24 random + 12 curated, NVC; 4 GHDL) ==="
-	@$(PY) tools/rtl_fuzz.py --n 24 --quick --sim nvc --ghdl-subset 4 	    --workdir $(BUILD)/rtl_fuzz_quick
+	@echo "=== quick cycle-exact fuzz (40 random incl. fwd, NVC; 8 GHDL) ==="
+	@$(PY) tools/rtl_fuzz.py --n 40 --quick --sim nvc --ghdl-subset 8 \
+	    --check-cycles --forwarding --workdir $(BUILD)/rtl_fuzz_quick
+
+rtl-fuzz:
+	@echo "=== full forwarding-targeted fuzz: 1000 NVC, 150 GHDL, cycle-exact ==="
+	@$(PY) tools/rtl_fuzz.py --n 1000 --mode fwd --sim nvc --ghdl-subset 150 \
+	    --check-cycles --forwarding --no-cov-assert \
+	    --workdir $(BUILD)/rtl_fuzz
+
+rtl-fuzz-general:
+	@echo "=== general six-mode fuzz: 300 NVC, 100 GHDL, cycle-exact ==="
+	@$(PY) tools/rtl_fuzz.py --n 300 --sim nvc --ghdl-subset 100 \
+	    --check-cycles --forwarding --workdir $(BUILD)/rtl_fuzz_general
+
+fwd-regression:
+	@echo "=== FORWARDING=false architectural regression (trace-only) ==="
+	@$(PY) tools/rtl_suite.py --sim nvc --quick --arch-only --no-forwarding \
+	    --exclude-timing-dependent --workdir $(BUILD)/rtl_regression
 
 rtl-test: rtl-leaf rtl-suite
 	@echo "RTL full differential test complete"
 
-rtl-fuzz:
-	@echo "=== full differential fuzz: 300 random + 12 curated on NVC, 50 on GHDL ==="
-	@$(PY) tools/rtl_fuzz.py --n 300 --sim nvc --ghdl-subset 50 	    --workdir $(BUILD)/rtl_fuzz
-
 mutation:
-	@echo "=== mutation check: 12 injected RTL bugs ==="
-	@$(PY) tools/mutation_check.py --workdir $(BUILD)/mutation
+	@echo "=== mutation check: directed + fuzz-only, NVC and GHDL ==="
+	@$(PY) tools/mutation_check.py --corpus 36 --ghdl-corpus 12 --check-cycles \
+	    --forwarding --json $(BUILD)/mutation.json --workdir $(BUILD)/mutation
 
 synth-smoke:
 	@echo "=== synthesis inference smoke test (Yosys + ghdl-yosys-plugin) ==="

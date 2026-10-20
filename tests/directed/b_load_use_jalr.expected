@@ -6,3 +6,4 @@ reg 3 0006
 reg 6 0000
 reg 7 2222
 ram 0100 0600
+cycles 14

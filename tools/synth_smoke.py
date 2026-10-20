@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Synthesis inference smoke test (time-boxed, non-blocking).
+"""Synthesis and timing measurement for MiniCPU-16 Phase 5B.
 
-Runs GHDL + ghdl-yosys-plugin + Yosys synth_ice40 on the Phase 5A core with
-default generics, reports SB_RAM40_4K/LUT/FF counts, and optionally runs
-nextpnr-ice40 for HX8K/UP5K Fmax estimates with a fixed seed.
+Runs GHDL + ghdl-yosys-plugin + Yosys synth_ice40 on the core, once with
+FORWARDING => true and once with FORWARDING => false, asserts that the
+instruction/data memories infer exactly BRAM_BLOCKS (24) SB_RAM40_4K blocks,
+runs nextpnr-ice40 for HX8K and UP5K at 50 MHz with seeds 1, 2, 3, and prints
+the cycle-exact CPI of the benchmark set.
 
-If the plugin or tools are missing, prints a SKIP with the exact commands and
-returns 0 (this target is not part of make test).
+If the plugin or a tool is missing the target prints SKIP with the exact
+commands and exits 0; it is not part of make test.
 """
 
 from __future__ import annotations
@@ -29,21 +31,26 @@ RTL = [
     "rtl/dmem.vhd", "rtl/mmio.vhd", "rtl/minicpu16_core.vhd",
 ]
 
+BRAM_BLOCKS = 24
+DEFAULT_SEEDS = (1, 2, 3)
+DEFAULT_DEVICES = (("hx8k", "ct256"), ("up5k", "sg48"))
+TARGET_MHZ = 50
+
 WRAPPER = '''library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.minicpu16_pkg.all;
 
--- Synthesis-only wrapper: the core's default INSTR_INIT is a single HALT word,
--- which is a valid design but is constant-folded by synthesis (no ROM to infer).
--- This wrapper supplies a non-constant 2048-word image so the instruction BRAM
--- inference can be measured.  RAM_BYTES/UART/COUNTING are the defaults.
-entity wrap_core is
+-- Synthesis-only wrapper: the core default INSTR_INIT is a single HALT word,
+-- which constant-folds, so no instruction ROM is inferred.  This wrapper
+-- supplies a non-constant 2048-word image and selects the forwarding
+-- configuration under test.
+entity {top} is
   port (clk : in std_logic; rst : in std_logic;
         gpio_in : in std_logic_vector(15 downto 0);
         sig : out std_logic_vector(7 downto 0));
 end entity;
-architecture rtl of wrap_core is
+architecture rtl of {top} is
   signal uart_tx_byte_s : std_logic_vector(7 downto 0);
   signal uart_tx_valid_s : std_logic;
   signal uart_busy_s : std_logic;
@@ -64,7 +71,7 @@ architecture rtl of wrap_core is
   constant DAT : byte_image_t := (0 => x"00");
 begin
   u : entity work.minicpu16_core
-    generic map (FORWARDING => false, INSTR_WORDS => 2048, RAM_BYTES => 4096,
+    generic map (FORWARDING => {fwd}, INSTR_WORDS => 2048, RAM_BYTES => 4096,
                  UART_CYCLES_PER_BYTE => 10, COUNTING => false,
                  INSTR_INIT => IMG, DATA_INIT => DAT)
     port map (clk => clk, rst => rst, gpio_in => gpio_in,
@@ -174,14 +181,54 @@ def parse_nextpnr(log: str) -> Dict[str, str]:
     return d
 
 
+def cpi_table() -> List[str]:
+    """Cycle-exact CPI, produced by the same suite as docs/BENCHMARKS.md."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import program_suite as ps
+    rows = ["", "## CPI (cycle-exact timing layer, forwarding contract)", "",
+            "| program | instructions | cycles | CPI | load-use stalls |",
+            "|---|---:|---:|---:|---:|"]
+    for prog in ps.PROGRAMS:
+        try:
+            _img, res = ps.run(prog)
+        except Exception as e:  # noqa: BLE001
+            rows.append("| %s | - | - | - | error: %s |" % (prog.name, e))
+            continue
+        cpi = res.cycles / res.instructions if res.instructions else 0.0
+        rows.append("| %s | %d | %d | %.3f | %d |"
+                    % (prog.name, res.instructions, res.cycles, cpi, res.stalls))
+    return rows
+
+
+def _ghdl_version(ghdl: str) -> str:
+    try:
+        out = subprocess.run([ghdl, "--version"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True).stdout
+        for line in out.splitlines():
+            if "GHDL" in line:
+                return line.strip()
+    except OSError:
+        pass
+    return ghdl
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Synthesis inference smoke test")
+    p = argparse.ArgumentParser(description="Synthesis + timing measurement")
     p.add_argument("--build", default=str(ROOT / "build" / "synth"))
     p.add_argument("--timeout", type=int, default=900)
-    p.add_argument("--nextpnr", action="store_true", default=True)
+    p.add_argument("--seeds", default="1,2,3")
+    p.add_argument("--devices", default="hx8k:ct256,up5k:sg48")
+    p.add_argument("--skip-nextpnr", action="store_true")
+    p.add_argument("--cpi", action="store_true", default=True)
     ns = p.parse_args(argv)
     build = Path(ns.build)
     build.mkdir(parents=True, exist_ok=True)
+    seeds = [int(s) for s in ns.seeds.split(",") if s]
+    devices = []
+    for d in ns.devices.split(","):
+        if ":" in d:
+            dev, pkg = d.split(":", 1)
+            devices.append((dev, pkg))
     ghdl = find_ghdl()
     prefix = ghdl_prefix(ghdl)
     plugin = find_plugin()
@@ -190,99 +237,119 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if plugin is None:
         print("SKIP synth-smoke: ghdl-yosys-plugin ghdl.so not found.")
-        print("Install/build it with:")
+        print("Build it with:")
         print("  git clone --depth 1 --branch ghdl-v6.0.0 https://github.com/ghdl/ghdl-yosys-plugin")
         print("  cd ghdl-yosys-plugin && make GHDL=%s" % ghdl)
-        print("  yosys -m /tmp/ghdl-yosys-plugin/ghdl.so ...")
         return 0
     env = dict(os.environ)
     if prefix:
         env["GHDL_PREFIX"] = prefix
-    wrapper = build / "wrap_core.vhd"
-    wrapper.write_text(WRAPPER)
-    report = ["# Synthesis inference smoke test", ""]
 
-    def synth(top: str, json_name: str, log_name: str) -> Tuple[Optional[Dict[str, int]], str]:
+    report = ["# Synthesis + timing (Phase 5B)", "",
+              "Toolchain: " + _ghdl_version(ghdl) +
+              " + ghdl-yosys-plugin + yosys synth_ice40 + nextpnr-ice40.", "",
+              "This is a flat, unconstrained iCE40 estimate.  nextpnr is run with "
+              "the default (unconstrained) placement; Fmax is a lower-bound "
+              "estimate from this flow, not a sign-off number, and the design is "
+              "not tuned.", ""]
+
+    configs = [("wrap_core_fwd", "true"), ("wrap_core_nofwd", "false")]
+    all_counts: Dict[str, Dict[str, int]] = {}
+    all_fmax: Dict[str, Dict[str, str]] = {}
+    for top, fwd in configs:
+        wrapper = build / (top + ".vhd")
+        wrapper.write_text(WRAPPER.format(top=top, fwd=fwd))
+        json_path = build / (top + ".json")
+        log_path = build / (top + "_yosys.log")
         script = ("ghdl --std=08 " + " ".join(RTL) + " " + str(wrapper) +
                   " -e " + top + "; synth_ice40 -top " + top + " -json " +
-                  str((build / json_name).resolve()))
-        print("running: yosys -m %s -p '%s'" % (plugin, script))
+                  str(json_path.resolve()))
+        print("running yosys for %s (FORWARDING=%s)" % (top, fwd))
         try:
             rr = run(["yosys", "-m", plugin, "-p", script], ROOT, ns.timeout, env)
         except subprocess.TimeoutExpired:
-            return None, "timeout after %d s" % ns.timeout
-        (build / log_name).write_text(rr.stdout)
+            print("FAIL: yosys timeout for %s" % top)
+            return 1
+        log_path.write_text(rr.stdout)
         if rr.returncode != 0:
-            return None, "Yosys exit %d" % rr.returncode
-        return parse_counts(rr.stdout), script
+            print("FAIL: yosys exit %d for %s (see %s)" % (rr.returncode, top,
+                                                           log_path))
+            return 1
+        all_counts[top] = parse_counts(rr.stdout)
 
-    counts_wrap, script_wrap = synth("wrap_core", "core.json", "yosys_wrap.log")
-    if counts_wrap is None:
-        print("FAIL synth-smoke: wrapper synthesis failed: %s" % script_wrap)
-        return 1
-    counts_def, script_def = synth("minicpu16_core", "core_default.json", "yosys_default.log")
+    report.append("## Inferred cells (synth_ice40)")
+    report.append("")
+    for top, fwd in configs:
+        counts = all_counts[top]
+        report.append("### %s (FORWARDING=%s)" % (top, fwd))
+        report.append("")
+        report.append("| cell | count |")
+        report.append("|---|---|")
+        for k in sorted(counts):
+            report.append("| %s | %d |" % (k, counts[k]))
+        report.append("")
 
-    report.append("Two syntheses are reported, both with `synth_ice40`:")
+    report.append("## Block-RAM assertion")
     report.append("")
-    report.append("1. `minicpu16_core` with the true default generics.  The default")
-    report.append("   `INSTR_INIT` is one HALT word, so the ROM constant-folds and no")
-    report.append("   instruction BRAM can be inferred; this is a valid but empty design.")
-    report.append("2. `wrap_core`: the same core with a non-constant 2048-word image")
-    report.append("   (`INSTR_WORDS=2048`, `RAM_BYTES=4096`, UART=10, COUNTING=false).")
-    report.append("   This is the meaningful block-RAM inference measurement.")
+    bram_ok = True
+    for top, fwd in configs:
+        ram = all_counts[top].get("SB_RAM40_4K", 0)
+        ok = (ram == BRAM_BLOCKS)
+        bram_ok = bram_ok and ok
+        report.append("* %s: SB_RAM40_4K = %d (expected %d) -> %s"
+                      % (top, ram, BRAM_BLOCKS, "PASS" if ok else "FAIL"))
     report.append("")
-    report.append("Commands:")
-    report.append("---")
-    report.append("GHDL_PREFIX=%s yosys -m %s -p \"%s\"" % (prefix, plugin, script_wrap))
-    report.append("---")
+    report.append("Expected: imem 2048x32 = 16 blocks, dmem 4096x8 = 8 blocks, "
+                  "total %d." % BRAM_BLOCKS)
     report.append("")
-    if counts_def is not None:
-        report.append("Default core counts:")
-        report.append("")
-        for k in sorted(counts_def):
-            report.append("* %s: %d" % (k, counts_def[k]))
-        report.append("")
-    report.append("Wrapper counts (non-constant image):")
-    report.append("")
-    for k in sorted(counts_wrap):
-        report.append("* %s: %d" % (k, counts_wrap[k]))
-    ram = counts_wrap.get("SB_RAM40_4K", 0)
-    report.append("")
-    report.append("SB_RAM40_4K count: %d. Expected order: imem 2048x32 = 16 "
-                  "blocks, dmem 4096x8 = 8 blocks (two byte banks)." % ram)
-    if ram == 0:
-        report.append("")
-        report.append("WARNING: no block RAM inferred. See docs/RTL_FINDINGS.md.")
-    counts = counts_wrap
+
     np = shutil.which("nextpnr-ice40")
-    if np:
-        for dev, pkg, freq in (("hx8k", "ct256", 50), ("up5k", "sg48", 50)):
-            asc = build / ("core_%s.asc" % dev)
-            cmd = [np, "--" + dev, "--package", pkg, "--json", str(build / "core.json"),
-                   "--pcf-allow-unconstrained", "--freq", str(freq), "--seed", "1",
-                   "--asc", str(asc)]
-            try:
-                nr = run(cmd, ROOT, ns.timeout, env)
-            except subprocess.TimeoutExpired:
-                report.append("* nextpnr %s: timed out" % dev)
-                continue
-            (build / ("nextpnr_%s.log" % dev)).write_text(nr.stdout)
-            d = parse_nextpnr(nr.stdout)
-            if nr.returncode != 0 and not d.get("fmax_mhz"):
-                report.append("* nextpnr %s: FAILED (see nextpnr_%s.log)" % (dev, dev))
-                continue
-            report.append("* nextpnr %s (%s, target %d MHz, seed 1): Fmax %s MHz, %s"
-                          % (dev, pkg, freq, d.get("fmax_mhz", "?"), d.get("at_target", "")))
-            if nr.returncode != 0:
-                report.append("  (nextpnr exits nonzero on a timing failure; this is an estimate, not a tuned result.)")
-            if d.get("critical_path"):
-                report.append("---")
-                report.append(d["critical_path"])
-                report.append("---")
+    if not ns.skip_nextpnr and np:
+        report.append("## nextpnr-ice40 Fmax at target %d MHz" % TARGET_MHZ)
+        report.append("")
+        report.append("| device | package | seed | config | Fmax (MHz) | target |")
+        report.append("|---|---|---|---|---|---|")
+        for dev, pkg in devices:
+            for seed in seeds:
+                for top, fwd in configs:
+                    asc = build / ("%s_%s_%d.asc" % (top, dev, seed))
+                    cmd = [np, "--" + dev, "--package", pkg,
+                           "--json", str(build / (top + ".json")),
+                           "--pcf-allow-unconstrained", "--freq", str(TARGET_MHZ),
+                           "--seed", str(seed), "--asc", str(asc)]
+                    logname = "%s_%s_%d.log" % (top, dev, seed)
+                    try:
+                        nr = run(cmd, ROOT, ns.timeout, env)
+                    except subprocess.TimeoutExpired:
+                        report.append("| %s | %s | %d | %s | timeout | - |"
+                                      % (dev, pkg, seed, fwd))
+                        continue
+                    (build / logname).write_text(nr.stdout)
+                    d = parse_nextpnr(nr.stdout)
+                    all_fmax[top + "_" + dev + "_" + str(seed)] = d
+                    report.append("| %s | %s | %d | %s | %s | %s |"
+                                  % (dev, pkg, seed, fwd,
+                                     d.get("fmax_mhz", "FAIL"),
+                                     d.get("at_target", "-")))
+                    if dev == "hx8k" and seed == 1 and d.get("critical_path"):
+                        report.append("")
+                        report.append("Critical path for " + top + ":")
+                        report.append("")
+                        report.append(d["critical_path"])
+                        report.append("")
+        report.append("")
     else:
-        report.append("* nextpnr-ice40 not found: no Fmax estimate.")
-    (build / "report.md").write_text("\n".join(report) + "\n")
+        report.append("nextpnr-ice40 not found or disabled: no Fmax estimate.")
+        report.append("")
+
+    if ns.cpi:
+        report.extend(cpi_table())
+
+    (build / "report_5b.md").write_text("\n".join(report) + "\n")
     print("\n".join(report))
+    if not bram_ok:
+        print("FAIL: block-RAM assertion did not hold")
+        return 1
     return 0
 
 
