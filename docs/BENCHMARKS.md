@@ -49,15 +49,44 @@ architectural result is checked by tools/test_programs.py.
 | nested_calls | 24 | 8 | 9 | 1 | 12 | 1 | 1 | 1 |
 | funcptr | 18 | 1 | 3 | 1 | 6 | 1 | 1 | 1 |
 
-## What this implies for Phase 5
+## Cycle exactness and composition (Phase 5B)
+
+Every row above satisfies `cycles = N + 4 + S + 2R` exactly, with `R` the
+taken conditional branches plus JAL plus JALR, and the RTL with
+`FORWARDING=true` reproduces the same cycle counts (verified by
+`tools/rtl_suite.py` and `tools/rtl_run.py`, not asserted).
+
+| Program | N | Cycles | S | R | 2R |
+|---|---:|---:|---:|---:|---:|
+| fibonacci | 112 | 156 | 0 | 20 | 40 |
+| factorial_rec | 287 | 448 | 7 | 75 | 150 |
+| bubble_sort | 1278 | 1950 | 120 | 274 | 548 |
+| crc16 | 647 | 893 | 10 | 116 | 232 |
+| memory_ops | 572 | 857 | 87 | 97 | 194 |
+| muldiv | 1186 | 1626 | 0 | 218 | 436 |
+| matmul | 12950 | 18114 | 0 | 2580 | 5160 |
+| hello | 257 | 400 | 57 | 41 | 82 |
+| switch | 58 | 96 | 4 | 15 | 30 |
+| nested_calls | 55 | 85 | 0 | 13 | 26 |
+| funcptr | 30 | 48 | 0 | 7 | 14 |
+
+## What this implies
 
 * The kernel-style programs (matmul, bubble_sort, muldiv) are dominated by
   ALU and branch work; the load/store share is significant in matmul and
   bubble_sort, so the load-use rule and forwarding paths are the first things
   to verify against RTL.
-* hello is UART-bound, not CPU-bound; its CPI is dominated by the busy-poll
-  loop and the 10-cycle UART model.
+* **Control transfers dominate the lost cycles**: they are 99.9% of matmul's
+  overhead above `N` and 99.1% of muldiv's.  Load-use stalls matter only in
+  the load-heavy integer programs (memory_ops 30.5%, hello 39.9%,
+  bubble_sort 17.9% of the program's own overhead).
+* hello is UART-bound in the golden model (its busy-poll loop and the 10-cycle
+  UART), not ALU-bound; its 57 load-use stalls are the polling reads.
 * switch and funcptr are short control-flow tests, useful as first
   retirement-trace vectors rather than as performance benchmarks.
-* A future MUL instruction would target matmul and muldiv; measure before
-  adding it, and keep the reserved opcode space.
+* Software multiply/divide is very expensive where used: 38.8% of
+  factorial_rec's cycles and 69.1% of muldiv's are in
+  `programs/runtime/arith.s`.  A future MUL instruction would target those
+  two; measure before adding it, and keep the reserved opcode space.
+* Full details and explicitly-unverified what-if estimates are in
+  <code>docs/OPTIMIZATION_DATA.md</code>.

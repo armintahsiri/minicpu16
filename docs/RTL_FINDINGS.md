@@ -303,6 +303,102 @@ and a synthesis-only wrapper with a non-constant 2048-word image (24 BRAM).  The
 wrapper is not part of the architectural RTL.  Fmax numbers from nextpnr are
 estimates (seed 1, target 50 MHz), not tuned results.
 
+## F25. UART busy was one cycle too long (RTL bug found and fixed)
+
+**Evidence.** The Phase 5A MMIO block derived `uart_busy` from a registered
+flag, so a status load observed busy for `N+1` cycles and a write issued on the
+"last busy" cycle could be accepted when the contract says it must be dropped.
+The hand tables in `docs/MICROARCH_CONTRACT.md` section 7.2 pin busy to exactly
+`c+1 .. c+N` after an accepting write in MEM cycle `c`.
+
+**Fix.** `rtl/mmio.vhd` now computes `uart_busy_s` combinationally from
+`uart_remaining`; the registered `uart_busy_r` was removed.  This changes no
+architectural register and no ISA behaviour.
+
+**Regression.** `f_uart_busy_edge` samples `UART_STATUS` on the last busy
+cycle (must read 1) and the first idle cycle (must read 0), with a hand-derived
+`.expected`; mutation 28 ("busy window off by one") is now detected by the
+directed test and by the fuzz-only corpus.
+
+## F26. Forwarding-unit producer wiring was stale (5A latent bug)
+
+**Evidence.** The Phase 5A `forwarding_unit` was structurally present but its
+producer inputs were wired to the wrong pipeline registers, so the `FORWARDING`
+generic was not actually implementing a correct forwarding network.
+
+**Fix.** The unit now observes EX/MEM and MEM/WB producers against the ID/EX
+consumer, with EX/MEM winning over MEM/WB, a load in EX/MEM never forwarded,
+R0 never forwarded, and valid bits preventing forwarding from bubbles.  The
+`FORWARDING=false` configuration is unchanged and still matches the 5A traces
+architecturally.
+
+**Regression.** The whole forwarding-targeted fuzz (1000 programs) and the
+directed `j_*` forwarding tests are cycle-exact against the layer; mutations
+13-19, 23-26 are detected.
+
+## F27. Link-register EX/MEM forwarding is architecturally unreachable
+
+**Evidence.** A taken JAL/JALR flushes the instruction that follows it in IF/ID;
+that instruction re-fetches when the jump is in WB, by which time the link value
+is already in the register file.  The only exercised link path is therefore
+WB->ID write-through.
+
+**Consequence.** The EX/MEM link forwarding path exists in the RTL but cannot
+change an architectural result.  It is not removed (it would complicate the
+mux for no gain) and it is explicitly not claimed as verified by trace
+comparison.  A directed test (`j_jal_link_next`) covers the reachable
+WB->ID case.
+
+## F28. `fwd_from_bubble` and `stall_near_flush` counters stay at zero
+
+**Evidence.** With forwarding enabled, a load-use stall and a redirect cannot
+occur in the same cycle: the stall requires a load in EX, and the redirect is
+produced by the instruction in EX.  Likewise the forwarding unit is gated by
+the stage valid bits, so it never forwards from a bubble.
+
+**Consequence.** The coverage counters `fwd_from_bubble` and
+`stall_near_flush` are expected to read zero under FORWARDING=true.  They are
+kept because they are the exact assertions that this impossibility holds; a
+non-zero value would itself be a bug.  The stall-versus-flush priority is
+covered by mutation 22 in the FORWARDING=false configuration.
+
+## F29. Cycle definition and the HALT drain
+
+**Evidence.** Every benchmark satisfies `cycles = N + 4 + S + 2*R` exactly
+(docs/OPTIMIZATION_DATA.md).  The `+4` is the IF..WB fill and the HALT drain;
+HALT itself adds no extra penalty beyond being an instruction that retires.
+
+**Consequence.** The retire-cycle column of the trace is an exact,
+independently-checkable quantity, not a derived convenience.
+
+## F30. Flat nextpnr estimates are lower for FORWARDING=true
+
+**Evidence.** In the unconstrained flat `nextpnr-ice40` flow, HX8K reports
+~43-45 MHz for FORWARDING=true and ~56-64 MHz for FORWARDING=false, with the
+forwarding build using ~112 more LUT4.  This is a placement/routing artifact of
+an unpipelined, untuned design; it is not a hardware result.
+
+**Consequence.** The reported Fmax numbers are lower-bound estimates from a
+shared, unconstrained flow and must not be read as a comparison of the two
+microarchitectures.  No timing fix was attempted in 5B (non-goal).
+
+---
+
+## Contract/model changes in Phase 5B
+
+Phase 5B amended the contract and timing layer in exactly the Step-2 peripheral
+area permitted by the brief (documented in `docs/MICROARCH_CONTRACT.md`
+section 7 and `docs/DECISIONS.md`):
+
+1. **UART busy window.**  Normative hand tables; busy is exactly `c+1..c+N`,
+   the write cycle `c` is not observable, first idle is `c+N+1`, and a write
+   whose MEM cycle is busy is dropped.  This corrected the 5A RTL (F25).
+2. **GPIO_IN synchroniser.**  Two-flop synchroniser (L=2): a read in MEM cycle
+   `c` returns `ext(c-2)`.  The schedule file format is now normative.
+3. **TIMER.**  A read in MEM cycle `c` returns `c mod 2^16`.
+
+No ISA change, and no change outside the peripheral timing listed above.
+
 ---
 
 ## Contract/model changes in Phase 5A

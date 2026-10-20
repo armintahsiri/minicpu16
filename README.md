@@ -5,16 +5,18 @@ against a Python golden model by retirement-trace comparison.**
 
 ![CI](https://github.com/armintahsiri/minicpu16/actions/workflows/test.yml/badge.svg)
 
-Status: **Phase 5A complete** - a 5-stage pipelined VHDL CPU with stall-only
-hazard handling, verified architecturally against the golden model by
-differential retirement traces and fuzzing.  The ISA is frozen
-(<code>isa-v1-frozen</code>), the retirement trace is identical to the golden
-model (retire cycles ignored), and 12/12 injected RTL bugs are detected.
+Status: **Phase 5B complete** - a 5-stage pipelined VHDL CPU with a full
+forwarding network, verified **cycle-exact** against the golden timing layer,
+not just architecturally.  The ISA is frozen (<code>isa-v1-frozen</code>), the
+retirement trace *including the retire-cycle column and the per-cycle stage
+occupancy* matches the golden model, and 30/30 injected RTL bugs are detected.
+The default configuration is `FORWARDING=true`; the stall-only
+`FORWARDING=false` build remains as an architectural regression.
 
-**Phase 5A does not claim cycle-exactness.**  Forwarding is structurally present
-but `FORWARDING=true` is unverified; 5A stalls instead and is intentionally
-slower than `docs/MICROARCH_CONTRACT.md`.  There is no hardware test and CI has
-not been executed on GitHub.
+Cycle exactness is asserted by 1000 forwarding fuzz programs on NVC plus 150 on
+GHDL, the full differential suite (136 case-runs), and every benchmark
+satisfying `cycles = N + 4 + S + 2R` exactly.  There is still **no hardware
+test** and CI has **not been executed on GitHub**.
 
 ## Goals
 
@@ -63,7 +65,7 @@ actually run.
 | <code>programs/</code> | benchmarks and <code>runtime/</code> (crt0, soft arithmetic, strings) |
 | <code>tests/reference_traces/</code> | five asm + trace pairs for the first Phase 5 vectors |
 
-## Implemented microarchitecture (Phase 5A)
+## Implemented microarchitecture (Phase 5B)
 
     IF -> ID -> EX -> MEM -> WB
      |     |     |
@@ -76,14 +78,21 @@ actually run.
                       data BRAM (two byte banks, RAM_BYTES)
     MMIO page at 0xFF00: UART_TX/STATUS, GPIO_OUT/IN, TIMER, reserved
 
-Phase 5A uses **stall-only hazards**: an ID instruction stalls while a producer of
-one of its actual sources is in EX or MEM (rd != R0); WB is covered by the
-write-through.  This is two stalls at distance 1, one at distance 2, none at
-distance 3.  The forwarding muxes and `forwarding_unit` are structurally present
-and drive `FORWARDING=true` in 5B, but that mode is **unverified**.  HALT drains
-and retires, younger instructions are flushed, and reset changes no architectural
-state except the specified PC/GPIO_OUT/TIMER/UART state.  Full equations, cycle
-tables and the memory interface timing are in <code>docs/RTL_ARCH.md</code>.
+Phase 5B uses **full forwarding** by default (`FORWARDING=true`): the ID/EX
+operands are taken from EX/MEM (youngest) or MEM/WB, EX/MEM wins, a load in
+EX/MEM is never forwarded but instead stalls its distance-1 consumer, R0 is
+never forwarded, and the mux is gated by the stage valid bits so bubbles and
+flushed instructions never source an operand.  Only load-use at distance 1
+stalls (one cycle).  With `FORWARDING=false` the earlier stall-only rule is
+kept: an ID instruction stalls while a producer of an actual source is in EX or
+MEM, WB being covered by write-through.
+
+The cycles are exactly the contract's: `N + 4 + S + 2R`, where `N` retires
+(including HALT), `S` is load-use stalls, and `R` is taken conditional
+branches + JAL + JALR.  HALT drains and retires, younger instructions are
+flushed, and reset changes no architectural state except the specified
+PC/GPIO_OUT/TIMER/UART state.  Full equations, cycle tables and the memory
+interface timing are in <code>docs/RTL_ARCH.md</code>.
 
 ## ISA summary
 
@@ -140,10 +149,11 @@ Individual checks:
     make programstest    # all benchmark programs and their expected results
     make gentest         # 200 random programs + reference traces
     make bench           # print table and regenerate docs/BENCHMARKS.md
-    make rtl-leaf        # 11 self-checking leaf testbenches, NVC and GHDL
+    make rtl-leaf        # self-checking leaf testbenches, NVC and GHDL
     make rtl-suite       # reference traces + benchmarks + directed, both sims
-    make rtl-fuzz        # 300 random + 12 curated programs; 50 on GHDL
-    make mutation        # 12 injected RTL bugs must be caught
+    make rtl-fuzz        # 1000 forwarding + curated programs, NVC and GHDL
+    make fwd-regression  # stall-only architectural regression (FORWARDING=false)
+    make mutation        # 30 injected RTL bugs must be caught
     make synth-smoke     # Yosys/GHDL block-RAM inference and Fmax estimate
 
 Run one RTL program differentially:
@@ -154,8 +164,11 @@ Run one RTL program differentially:
 
     python3 tools/rtl_run.py programs/bubble_sort.s --runtime --sim ghdl
 
-The default comparison ignores the retire-cycle column (5A).  Use
-<code>--check-cycles</code> only for Phase 5B.
+Comparisons are **cycle-exact** by default in Phase 5B: the retire-cycle
+column and the per-cycle pipeview are compared as well as the architectural
+retirement records and final state.  Use <code>--arch-only</code> for the
+architectural (5A-style) comparison, which the `FORWARDING=false`
+regression uses.
 
 Assemble, run and trace a program:
 
@@ -194,65 +207,80 @@ From <code>docs/BENCHMARKS.md</code>; default 4 KB RAM, 2048 instruction words,
 | funcptr | 30 | 48 | 1.600 | 60.0 | 3.3 | 10.0 | 3.3 | 20.0 | 100.0 | 0 |
 
 CPI above 1 is the pipeline fill/drain, taken-branch penalty and load-use stalls.
-These are the **contract** numbers from the golden timing layer.  The 5A RTL is
-intentionally slower (stall-only) and its cycle counts are **not** compared; 5B
-owns cycle exactness.  For example, 5A bubble_sort takes 2647 cycles instead of
-1950, with 817 stall cycles instead of 120.
+These are the **contract** numbers from the golden timing layer, and in Phase 5B
+the RTL matches them **exactly** with `FORWARDING=true` (verified, not
+asserted).  The stall-only `FORWARDING=false` configuration is intentionally
+slower and is compared architecturally only; for example its bubble_sort takes
+2647 cycles instead of 1950, with 817 stall cycles instead of 120.
+
+The composition is documented in <code>docs/OPTIMIZATION_DATA.md</code>; in
+short, taken control transfers dominate the overhead (99.9% of matmul's) and
+load-use stalls matter only in the load-heavy integer programs.
 
 ## Tests actually run
 
-<code>make clean && make test</code> currently reports:
+<code>make clean && make test</code> currently reports (Phase 5B):
 
 * consistency: 490 checks, PASS; negative mutation self-test PASS
 * assembler: 20 test methods / 830 hand-computed checks
-* golden model: 37 test methods / 22,204 checks
+* golden model / timing layer: 37 test methods / 22,204 checks
 * trace diff: 8 test methods / 17 checks
 * programs: 6 test methods / 290 checks
 * generator: 5 test methods / 80 checks (200 programs, all opcodes, all hazard patterns)
 * VHDL: NVC and GHDL both analyse the constants package and a generated program package
-* leaf RTL: 11 testbenches / **8,023,388 checks across NVC and GHDL** (4,011,694 per simulator), 0 failures
-* differential suite: **61 case-runs, 0 failed** (NVC 43 = 4 reference traces +
-  10 benchmarks + 29 directed; GHDL 18); reference traces 01-04 match
-  architecturally, 05_mmio is excluded as cycle_sensitive
-* full fuzz (<code>make rtl-fuzz</code>): **312 programs on NVC, 50 on GHDL,
-  0 mismatches**, every coverage counter non-zero
-* mutation: **12/12 injected bugs detected**
+* leaf RTL: **26 testbench runs / 8,023,444 checks across NVC and GHDL**, 0 failures
+* differential suite (full `make rtl-test`): **140 case-runs, 0 failed**,
+  cycle-exact; the quick subset in `make test` is 46 case-runs
+* quick fuzz in `make test`: 52 case-runs (40 NVC + 8 GHDL subset + curated),
+  0 failed, cycle-exact
+* forwarding fuzz (<code>make rtl-fuzz</code>): **1000 programs on NVC, 150 on
+  GHDL, 0 mismatches**, cycle-exact, every reachable coverage counter non-zero
+* stall-only regression (<code>make fwd-regression</code>): 0 failed, architecture only
+* mutation: **30/30 detected on NVC, 30/30 on GHDL, 27/30 (90%) by the
+  fuzz-only corpus** (threshold >= 90%)
 
-Cycle counts in 5A are intentionally higher than the contract; only architectural
-retirement records and final state are compared.
+Because forwarding is now the default, the cycle-exact comparison includes the
+retire-cycle column and the per-cycle stage occupancy.
 
 ### Synthesis smoke (<code>make synth-smoke</code>, estimate only)
 
-Yosys 0.70 + ghdl-yosys-plugin (GHDL 6.0.0) and <code>synth_ice40</code>, default
-generics except a non-constant 2048-word image (the default image is one HALT word
-and constant-folds to 0 BRAM):
+Yosys 0.70 + ghdl-yosys-plugin (GHDL 6.0.0) and <code>synth_ice40</code>, both
+`FORWARDING` configurations, a non-constant 2048-word image (the default image
+is one HALT word and constant-folds to 0 BRAM):
 
-* **24 `SB_RAM40_4K`** (16 instruction + 8 data), 1263 LUT4, 611 flip-flops
-* HX8K (ct256, seed 1, target 50 MHz): **59.22 MHz**, PASS
-* UP5K (sg48, seed 1, target 50 MHz): **25.58 MHz**, FAIL at 50
-* critical paths: HX8K instruction-BRAM output -> decode/control; UP5K `b_ex` ->
-  `ex_mem_result`
+* **24 `SB_RAM40_4K`** (16 instruction + 8 data) in **both** configurations
+* `FORWARDING=false`: 1257 LUT4, 610 flip-flops
+* `FORWARDING=true`: 1369 LUT4, 618 flip-flops
+* HX8K (ct256, 50 MHz, seeds 1/2/3): nofwd **55.59 / 63.92 / 62.22 MHz** (PASS);
+  fwd **43.33 / 43.38 / 44.54 MHz** (FAIL at 50)
+* UP5K (sg48, 50 MHz, seeds 1/2/3): nofwd **25.34 / 24.94 / 25.54 MHz** (FAIL);
+  fwd **18.07 / 17.78 / 18.74 MHz** (FAIL)
 
-These are placement/routing estimates, not hardware measurements; the design was
-not tuned for Fmax in Phase 5A.
+These are placement/routing estimates from a flat, untuned flow, not hardware
+measurements.  On this flow forwarding is *slower*, not faster; that is expected
+for an unpipelined flat design and no timing fix was attempted (Fmax tuning is a
+Phase 5B non-goal).  The 5A baseline was HX8K 59.22 MHz, UP5K 25.58 MHz, 1263
+LUT4.
 
 ## Honest limitations
 
-* **No cycle-exactness claim.**  Phase 5A is stall-only; its cycles are not the
-  contract's cycles.  <code>FORWARDING=true</code> is structurally present but
-  **unverified**.  That is Phase 5B's job.
+* **Cycle exactness is verified at the RTL/model level, not on hardware.**
+  `FORWARDING=true` matches the timing layer including retire cycles and stage
+  occupancy, but nothing has run on an FPGA and the Fmax numbers are untuned
+  estimates.
 * **No hardware test.**  Nothing has run on an FPGA.  The synthesis smoke test is
   an inference/count estimate, not a placed-and-routed hardware result; Fmax is an
   estimate with a fixed seed.
 * CI is written and updated for Phase 5A, but it has **not been executed on
   GitHub**.  The workflow installs NVC and the distro GHDL; package versions and
   action behaviour are unverified.  Mutation and full fuzz stay local.
-* MMIO programs that observe cycle timing (TIMER, UART_STATUS polling, GPIO_IN)
-  are excluded from the 5A differential suite; 05_mmio and hello are the named
-  exclusions.  GPIO_IN has a two-flop synchroniser, so it is not the golden
-  model's immediate value.
+* The peripheral timing (TIMER, UART busy window, GPIO_IN synchroniser) was
+  made normative in contract section 7 during Phase 5B and the RTL was corrected
+  (finding F25); those programs are now compared cycle-exactly too.
 * No MUL/DIV in the base ISA; software routines exist but multiply, divide and
-  modulo have not yet been exercised through a C compiler.
+  modulo have not yet been exercised through a C compiler.  In the benchmark set
+  only factorial_rec (38.8% of cycles) and muldiv (69.1%) use them
+  (<code>docs/OPTIMIZATION_DATA.md</code>).
 * No traps, interrupts, exceptions, memory protection, caches, or atomics.
   Misaligned LW/SW silently align down.
 * Reset does not reload <code>.data</code> and does not clear registers; crt0
@@ -269,9 +297,11 @@ not tuned for Fmax in Phase 5A.
   memories, MMIO, HALT drain, reset gating, stall-only hazard handling; leaf
   testbenches, directed tests, reference traces, benchmarks, 312-program fuzz and
   12/12 mutation detection.
-* **Phase 5B** - enable forwarding, verify the one-cycle load-use rule, and make
-  the RTL cycle-exact against <code>docs/MICROARCH_CONTRACT.md</code>; then the
-  reference-trace retire cycles and benchmark cycle counts become assertions.
+* **Phase 5B (done)** - full forwarding and the one-cycle load-use rule; RTL
+  cycle-exact against <code>docs/MICROARCH_CONTRACT.md</code> including the
+  retire-cycle column and stage occupancy; 1000+150 cycle-exact fuzz, 30/30
+  mutation detection, peripheral timing made normative and corrected, Fmax/CPI
+  measured honestly.
 * **Phase 6** - FPGA synthesis and timing (Yosys/nextpnr), UART/GPIO/TIMER on real
   hardware, CPI/Fmax on these benchmarks, MUL evaluation, BTFN evaluation.
 * **Phase 7** - a C-subset compiler (Python, MIT, standard library only) targeting
