@@ -26,7 +26,7 @@ use work.minicpu16_pkg.all;
 
 entity minicpu16_core is
   generic (
-    FORWARDING           : boolean := false;
+    FORWARDING           : boolean := true;
     INSTR_WORDS          : integer := 2048;
     RAM_BYTES            : integer := 4096;
     UART_CYCLES_PER_BYTE : integer := 10;
@@ -57,6 +57,20 @@ entity minicpu16_core is
     retire_taken      : out std_logic;
     retire_target     : out std_logic_vector(15 downto 0);
     retire_halt       : out std_logic;
+
+    -- Verification-only pipeview port.  It observes the pipeline registers and
+    -- the two control flags; it adds no logic to the architectural datapath and
+    -- disappears from synthesis when left unconnected.
+    pipe_id_valid  : out std_logic;
+    pipe_id_pc     : out std_logic_vector(15 downto 0);
+    pipe_ex_valid  : out std_logic;
+    pipe_ex_pc     : out std_logic_vector(15 downto 0);
+    pipe_mem_valid : out std_logic;
+    pipe_mem_pc    : out std_logic_vector(15 downto 0);
+    pipe_wb_valid  : out std_logic;
+    pipe_wb_pc     : out std_logic_vector(15 downto 0);
+    pipe_stall     : out std_logic;
+    pipe_flush     : out std_logic;
 
     cov               : out cov_t
   );
@@ -179,6 +193,11 @@ architecture rtl of minicpu16_core is
   -- Verification counters.
   signal cov_reg : cov_t := (others => (others => '0'));
 
+  function fwd_active (sel : std_logic_vector(1 downto 0)) return boolean is
+  begin
+    return sel = FWD_EXMEM or sel = FWD_MEMWB;
+  end function;
+
 begin
 
   -- Elaboration-time parameter checks.
@@ -188,6 +207,17 @@ begin
   assert UART_CYCLES_PER_BYTE >= 0 report "UART_CYCLES_PER_BYTE must be >= 0" severity failure;
 
   pc_out <= std_logic_vector(pc);
+
+  pipe_id_valid  <= if_id_valid;
+  pipe_id_pc     <= if_id_pc;
+  pipe_ex_valid  <= id_ex_valid;
+  pipe_ex_pc     <= id_ex_pc;
+  pipe_mem_valid <= ex_mem_valid;
+  pipe_mem_pc    <= ex_mem_pc;
+  pipe_wb_valid  <= mem_wb_valid;
+  pipe_wb_pc     <= mem_wb_pc;
+  pipe_stall     <= stall;
+  pipe_flush     <= ex_redirect or ex_halt;
 
   -- During a stall the imem output register is the IF/ID instruction register.
   -- Re-read the ID instruction's own address so the register holds it while the
@@ -267,18 +297,21 @@ begin
       cause_load_use   => cause_load_use
     );
 
+  -- Producer inputs are the instructions in MEM (EX/MEM) and WB (MEM/WB).
+  -- The consumer is the instruction in EX (ID/EX).  EX/MEM is younger than
+  -- MEM/WB and wins; a load in EX/MEM does not forward its ALU result.
   u_forward : entity work.forwarding_unit
     generic map (FORWARDING => FORWARDING)
     port map (
       id_rs1        => id_ex_ctrl.rs1,
       id_rs2        => id_ex_ctrl.rs2,
-      ex_valid      => id_ex_valid,
-      ex_reg_write  => id_ex_ctrl.reg_write,
-      ex_rd         => id_ex_ctrl.rd,
-      ex_is_load    => id_ex_ctrl.is_load,
-      mem_valid     => ex_mem_valid,
-      mem_reg_write => ex_mem_ctrl.reg_write,
-      mem_rd        => ex_mem_ctrl.rd,
+      ex_valid      => ex_mem_valid,
+      ex_reg_write  => ex_mem_ctrl.reg_write,
+      ex_rd         => ex_mem_ctrl.rd,
+      ex_is_load    => ex_mem_ctrl.is_load,
+      mem_valid     => mem_wb_valid,
+      mem_reg_write => mem_wb_ctrl.reg_write,
+      mem_rd        => mem_wb_ctrl.rd,
       sel_a         => fwd_a,
       sel_b         => fwd_b
     );
@@ -597,6 +630,86 @@ begin
         if mem_wb_valid = '1' and mem_wb_ctrl.is_load = '1' and mem_wb_ctrl.rd = "0000" then
           cov_reg(COV_LOAD_R0) <= std_logic_vector(unsigned(cov_reg(COV_LOAD_R0)) + 1);
         end if;
+        -- Phase 5B forwarding coverage.  These observe the selected mux and
+        -- the producer/consumer control bundles; they never drive the datapath.
+        if fwd_a = FWD_EXMEM then
+          cov_reg(COV_FWD_EXMEM_A) <= std_logic_vector(unsigned(cov_reg(COV_FWD_EXMEM_A)) + 1);
+        end if;
+        if fwd_b = FWD_EXMEM then
+          cov_reg(COV_FWD_EXMEM_B) <= std_logic_vector(unsigned(cov_reg(COV_FWD_EXMEM_B)) + 1);
+        end if;
+        if fwd_a = FWD_MEMWB then
+          cov_reg(COV_FWD_MEMWB_A) <= std_logic_vector(unsigned(cov_reg(COV_FWD_MEMWB_A)) + 1);
+        end if;
+        if fwd_b = FWD_MEMWB then
+          cov_reg(COV_FWD_MEMWB_B) <= std_logic_vector(unsigned(cov_reg(COV_FWD_MEMWB_B)) + 1);
+        end if;
+        if id_ex_valid = '1' and id_ex_ctrl.is_branch = '1' and
+           (fwd_active(fwd_a) or fwd_active(fwd_b)) then
+          cov_reg(COV_FWD_BRANCH) <= std_logic_vector(unsigned(cov_reg(COV_FWD_BRANCH)) + 1);
+        end if;
+        if id_ex_valid = '1' and id_ex_ctrl.is_store = '1' and fwd_active(fwd_b) then
+          cov_reg(COV_FWD_STORE_DATA) <= std_logic_vector(unsigned(cov_reg(COV_FWD_STORE_DATA)) + 1);
+        end if;
+        if id_ex_valid = '1' and id_ex_ctrl.is_store = '1' and fwd_active(fwd_a) then
+          cov_reg(COV_FWD_STORE_ADDR) <= std_logic_vector(unsigned(cov_reg(COV_FWD_STORE_ADDR)) + 1);
+        end if;
+        if id_ex_valid = '1' and id_ex_ctrl.is_jalr = '1' and fwd_active(fwd_a) then
+          cov_reg(COV_FWD_JALR_BASE) <= std_logic_vector(unsigned(cov_reg(COV_FWD_JALR_BASE)) + 1);
+        end if;
+        if id_ex_valid = '1' and ex_mem_valid = '1' and mem_wb_valid = '1' and
+           ex_mem_ctrl.reg_write = '1' and mem_wb_ctrl.reg_write = '1' and
+           ex_mem_ctrl.rd /= "0000" and ex_mem_ctrl.rd = mem_wb_ctrl.rd and
+           ((id_ex_ctrl.rs1_en = '1' and id_ex_ctrl.rs1 = ex_mem_ctrl.rd) or
+            (id_ex_ctrl.rs2_en = '1' and id_ex_ctrl.rs2 = ex_mem_ctrl.rd)) then
+          cov_reg(COV_FWD_PRIORITY) <= std_logic_vector(unsigned(cov_reg(COV_FWD_PRIORITY)) + 1);
+        end if;
+        if id_ex_valid = '1' and
+           ((id_ex_ctrl.rs1_en = '1' and id_ex_ctrl.rs1 = "0000") or
+            (id_ex_ctrl.rs2_en = '1' and id_ex_ctrl.rs2 = "0000")) and
+           fwd_a = FWD_ID and fwd_b = FWD_ID then
+          cov_reg(COV_FWD_R0_SOURCE) <= std_logic_vector(unsigned(cov_reg(COV_FWD_R0_SOURCE)) + 1);
+        end if;
+        if stall = '1' and id_ex_valid = '1' and id_ex_ctrl.is_load = '1' then
+          if id_ctrl.is_alu = '1' then
+            cov_reg(COV_STALL_LU_ALU) <= std_logic_vector(unsigned(cov_reg(COV_STALL_LU_ALU)) + 1);
+          end if;
+          if id_ctrl.is_store = '1' and cause_store = '1' then
+            cov_reg(COV_STALL_LU_STORE_DATA) <= std_logic_vector(unsigned(cov_reg(COV_STALL_LU_STORE_DATA)) + 1);
+          end if;
+          if id_ctrl.is_store = '1' and cause_rs1 = '1' then
+            cov_reg(COV_STALL_LU_STORE_ADDR) <= std_logic_vector(unsigned(cov_reg(COV_STALL_LU_STORE_ADDR)) + 1);
+          end if;
+          if id_ctrl.is_branch = '1' then
+            cov_reg(COV_STALL_LU_BRANCH) <= std_logic_vector(unsigned(cov_reg(COV_STALL_LU_BRANCH)) + 1);
+          end if;
+          if id_ctrl.is_jalr = '1' then
+            cov_reg(COV_STALL_LU_JALR) <= std_logic_vector(unsigned(cov_reg(COV_STALL_LU_JALR)) + 1);
+          end if;
+        end if;
+        if (ex_redirect = '1' or ex_halt = '1') and id_ex_valid = '1' and
+           id_ex_ctrl.is_load = '1' and id_ex_ctrl.rd /= "0000" and
+           ((id_ctrl.rs1_en = '1' and id_ctrl.rs1 = id_ex_ctrl.rd) or
+            (id_ctrl.rs2_en = '1' and id_ctrl.rs2 = id_ex_ctrl.rd)) then
+          cov_reg(COV_STALL_NEAR_FLUSH) <= std_logic_vector(unsigned(cov_reg(COV_STALL_NEAR_FLUSH)) + 1);
+        end if;
+        if (fwd_active(fwd_a) and mem_wb_valid = '1' and mem_wb_ctrl.op = OP_LB) or
+           (fwd_active(fwd_b) and mem_wb_valid = '1' and mem_wb_ctrl.op = OP_LB) then
+          cov_reg(COV_FWD_LB_SEXT) <= std_logic_vector(unsigned(cov_reg(COV_FWD_LB_SEXT)) + 1);
+        end if;
+        if (fwd_active(fwd_a) and ((ex_mem_valid = '1' and (ex_mem_ctrl.is_jal = '1' or ex_mem_ctrl.is_jalr = '1')) or
+                                   (mem_wb_valid = '1' and (mem_wb_ctrl.is_jal = '1' or mem_wb_ctrl.is_jalr = '1')))) or
+           (fwd_active(fwd_b) and ((ex_mem_valid = '1' and (ex_mem_ctrl.is_jal = '1' or ex_mem_ctrl.is_jalr = '1')) or
+                                   (mem_wb_valid = '1' and (mem_wb_ctrl.is_jal = '1' or mem_wb_ctrl.is_jalr = '1')))) then
+          cov_reg(COV_FWD_LINK) <= std_logic_vector(unsigned(cov_reg(COV_FWD_LINK)) + 1);
+        end if;
+        if (fwd_a = FWD_EXMEM and ex_mem_valid = '0') or
+           (fwd_b = FWD_EXMEM and ex_mem_valid = '0') or
+           (fwd_a = FWD_MEMWB and mem_wb_valid = '0') or
+           (fwd_b = FWD_MEMWB and mem_wb_valid = '0') then
+          cov_reg(COV_FWD_FROM_BUBBLE) <= std_logic_vector(unsigned(cov_reg(COV_FWD_FROM_BUBBLE)) + 1);
+        end if;
+
         if uart_drop_pulse = '1' then
           cov_reg(COV_UART_DROP) <= std_logic_vector(unsigned(cov_reg(COV_UART_DROP)) + 1);
         end if;

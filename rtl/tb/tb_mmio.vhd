@@ -124,39 +124,40 @@ begin
     do_load(addr, load_en, load_type, clk, 16#FF04#, LOAD_LW);
     check (rdata = x"12AB", "GPIO_OUT after byte write", checks, fails);
 
-    -- UART_TX word write, busy, status and drop.
+    -- UART_TX word write.  Busy is combinational from the countdown, so it is
+    -- high in the accepting write's cycle and for exactly N further cycles.
     do_store(addr, store_en, store_type, wdata, clk, 16#FF00#, true, 16#0041#);
     check (uart_tx_valid = '1', "UART TX valid pulse", checks, fails);
     check (uart_tx_byte = x"41", "UART TX byte", checks, fails);
     check (uart_busy = '1', "UART busy after start", checks, fails);
 
-    -- The next write is one cycle later, while the first byte is busy.
+    -- Status while busy, word and LB.  The write commits at the edge ending
+    -- cycle c; the countdown still reads N after that edge, N-1 after the next,
+    -- and reaches 0 on the N-th following edge.  These two loads sample the
+    -- countdown values N-1 and N-2, both of which must read busy (contract
+    -- section 7.2, finding F25).
+    do_load(addr, load_en, load_type, clk, 16#FF02#, LOAD_LW);
+    check (rdata = x"0001", "UART_STATUS busy word", checks, fails);
+    do_load(addr, load_en, load_type, clk, 16#FF02#, LOAD_LB);
+    check (rdata = x"0001", "UART_STATUS busy LB", checks, fails);
+
+    -- One more edge brings the countdown to N-3 = 0, so a write in that cycle
+    -- is still dropped (the countdown is N-3 > 0 before the edge).
     do_store(addr, store_en, store_type, wdata, clk, 16#FF00#, true, 16#0042#);
     check (uart_tx_valid = '0', "UART write while busy is dropped", checks, fails);
     check (uart_drop_pulse = '1', "UART drop pulse", checks, fails);
     check (drop_count = x"00000001", "UART drop count", checks, fails);
 
-    do_load(addr, load_en, load_type, clk, 16#FF02#, LOAD_LW);
-    check (rdata = x"0001", "UART_STATUS busy word", checks, fails);
-    do_load(addr, load_en, load_type, clk, 16#FF02#, LOAD_LB);
-    check (rdata = x"0001", "UART_STATUS busy LB", checks, fails);
+    check (uart_busy = '0', "UART busy clears", checks, fails);
     do_load(addr, load_en, load_type, clk, 16#FF00#, LOAD_LW);
     check (rdata = x"0000", "UART_TX read returns 0", checks, fails);
-
-    -- Wait until the first byte is no longer busy (3 cycles after write).
-    wait until rising_edge(clk);
-    wait until rising_edge(clk);
-    wait until rising_edge(clk);
-    wait until rising_edge(clk);
-    wait for 1 ns;
-    check (uart_busy = '0', "UART busy clears", checks, fails);
     do_load(addr, load_en, load_type, clk, 16#FF02#, LOAD_LW);
     check (rdata = x"0000", "UART_STATUS idle", checks, fails);
 
-    -- Next byte accepts, including SB at the odd address 0xFF01.
-    do_store(addr, store_en, store_type, wdata, clk, 16#FF01#, false, 16#0043#);
+    -- Another byte accepts, including SB at the odd address 0xFF01.
+    do_store(addr, store_en, store_type, wdata, clk, 16#FF01#, false, 16#0044#);
     check (uart_tx_valid = '1', "UART odd-address SB transmits", checks, fails);
-    check (uart_tx_byte = x"43", "UART odd-address byte", checks, fails);
+    check (uart_tx_byte = x"44", "UART odd-address byte", checks, fails);
     wait until rising_edge(clk);
     wait until rising_edge(clk);
     wait until rising_edge(clk);

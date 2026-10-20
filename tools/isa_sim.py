@@ -76,6 +76,10 @@ RAM_BYTES_DEFAULT = 4096
 RAM_BYTES_MAX = 0xFF00
 INSTR_WORDS_DEFAULT = 2048
 UART_CYCLES_DEFAULT = 10
+# GPIO_IN synchroniser depth in the RTL.  A read in MEM at cycle c observes the
+# external value that was stable during cycle c - GPIO_SYNC_LATENCY.  This is
+# normative in docs/MICROARCH_CONTRACT.md section 7.3.
+GPIO_SYNC_LATENCY = 2
 HALT_WORD = 0x00000000
 
 
@@ -228,6 +232,46 @@ class Config:
             raise ValueError("ram_init is larger than ram_bytes")
 
 
+def load_gpio_schedule(path: str) -> List[Tuple[int, int]]:
+    """Load the deterministic GPIO_IN input schedule.
+
+    Format (shared by the golden model and the RTL testbench; normative in
+    docs/MICROARCH_CONTRACT.md section 7.3):
+        # comment
+        <cycle> <value>
+    Blank lines and '#' comments are ignored.  cycle is a decimal or 0x-prefixed
+    integer >= 1; value is a decimal or 0x-prefixed integer in 0..0xFFFF.  The
+    external value during cycle t is the value of the last entry with
+    entry_cycle <= t; before the first entry it is 0.  Entries are sorted by
+    cycle; duplicate cycles are an error.
+    """
+    entries: List[Tuple[int, int]] = []
+    seen = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            s = raw.split("#", 1)[0].strip()
+            if not s:
+                continue
+            parts = s.split()
+            if len(parts) != 2:
+                raise ValueError("%s:%d: expected '<cycle> <value>'" % (path, lineno))
+            try:
+                c = int(parts[0], 0)
+                v = int(parts[1], 0)
+            except ValueError:
+                raise ValueError("%s:%d: bad integer" % (path, lineno))
+            if c < 1:
+                raise ValueError("%s:%d: cycle must be >= 1" % (path, lineno))
+            if not 0 <= v <= 0xFFFF:
+                raise ValueError("%s:%d: value out of 16-bit range" % (path, lineno))
+            if c in seen:
+                raise ValueError("%s:%d: duplicate cycle %d" % (path, lineno, c))
+            seen.add(c)
+            entries.append((c, v))
+    entries.sort()
+    return entries
+
+
 class WatchdogError(RuntimeError):
     pass
 
@@ -273,6 +317,36 @@ TRACE_HEADER = "\n".join([
 
 
 @dataclass
+class PipeRecord:
+    """Per-cycle stage occupancy, for the Phase 5B pipeview comparison."""
+    cycle: int
+    id_v: int
+    id_pc: int
+    ex_v: int
+    ex_pc: int
+    mem_v: int
+    mem_pc: int
+    wb_v: int
+    wb_pc: int
+    stall: int
+    flush: int
+
+    def line(self) -> str:
+        return "%d %d %04X %d %04X %d %04X %d %04X %d %d" % (
+            self.cycle, self.id_v, self.id_pc & 0xFFFF,
+            self.ex_v, self.ex_pc & 0xFFFF,
+            self.mem_v, self.mem_pc & 0xFFFF,
+            self.wb_v, self.wb_pc & 0xFFFF,
+            self.stall, self.flush)
+
+
+PIPE_HEADER = "\n".join([
+    "# minicpu16-pipeview v1",
+    "# cycle id_v id_pc ex_v ex_pc mem_v mem_pc wb_v wb_pc stall flush",
+])
+
+
+@dataclass
 class Result:
     regs: List[int]
     pc: int
@@ -288,6 +362,7 @@ class Result:
     instr_words: int
     ram_bytes: int
     uart_cycles_per_byte: int
+    pipe: List[PipeRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -311,6 +386,9 @@ class Result:
 
     def trace_text(self) -> str:
         return TRACE_HEADER + "\n" + "\n".join(r.line() for r in self.trace) + ("\n" if self.trace else "")
+
+    def pipe_text(self) -> str:
+        return PIPE_HEADER + "\n" + "\n".join(r.line() for r in self.pipe) + ("\n" if self.pipe else "")
 
     def instruction_mix(self) -> Dict[str, int]:
         mix: Dict[str, int] = {}
@@ -356,6 +434,7 @@ class Machine:
         self.uart_busy_until = 0
         self.gpio_out = 0
         self.trace: List[TraceRecord] = []
+        self.pipe: List[PipeRecord] = []
         self.stalls = 0
         self.flushes = 0
         self.final_pc = 0
@@ -375,19 +454,34 @@ class Machine:
         return self.words[pc]
 
     # -- GPIO --------------------------------------------------------------
-    def gpio_in_value(self) -> int:
+    def gpio_in_ext(self, cycle: int) -> int:
+        """External GPIO_IN value during architectural cycle 'cycle'.
+
+        Schedule semantics (docs/MICROARCH_CONTRACT.md section 7.3):
+          * an integer schedule is a constant for every cycle, including the
+            cycles before cycle 1;
+          * a list of (cycle, value) pairs is a step function: the value of the
+            last entry with entry_cycle <= cycle, and 0 before the first entry;
+          * a callable is asked for the value directly.
+        """
         s = self._gpio_schedule
         if s is None:
             return self._gpio_initial & 0xFFFF
+        if cycle <= 0:
+            return 0
         if callable(s):
-            return int(s(self.cycle)) & 0xFFFF
-        val = self._gpio_initial
+            return int(s(cycle)) & 0xFFFF
+        val = 0
         for c, v in s:  # type: ignore[misc]
-            if c <= self.cycle:
+            if c <= cycle:
                 val = v
             else:
                 break
         return int(val) & 0xFFFF
+
+    def gpio_in_value(self) -> int:
+        """Value observed by an MMIO read that samples in the current MEM cycle."""
+        return self.gpio_in_ext(self.cycle - GPIO_SYNC_LATENCY)
 
     # -- UART --------------------------------------------------------------
     def uart_busy(self) -> bool:
@@ -517,7 +611,8 @@ class Machine:
         return Result(self.regs[:], self.final_pc, bytes(self.ram), list(self.uart),
                       self.gpio_out, self.cycle, self.instructions, self.halted,
                       self.trace, self.stalls, self.flushes, self.cfg.instr_words,
-                      self.cfg.ram_bytes, self.cfg.uart_cycles_per_byte)
+                      self.cfg.ram_bytes, self.cfg.uart_cycles_per_byte,
+                      self.pipe[:])
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +800,15 @@ def run_pipeline(words: Sequence[int], cfg: Optional[Config] = None,
             return mem_wb.wb_value & 0xFFFF
         return m.regs[reg] & 0xFFFF
 
+    def pipe_rec(stall_now: bool, flush_now: bool) -> PipeRecord:
+        return PipeRecord(
+            m.cycle,
+            1 if if_id.valid else 0, if_id.pc,
+            1 if id_ex.valid else 0, id_ex.pc,
+            1 if ex_mem.valid else 0, ex_mem.pc,
+            1 if mem_wb.valid else 0, mem_wb.pc,
+            1 if stall_now else 0, 1 if flush_now else 0)
+
     def forward(reg: Optional[int], value: int) -> int:
         if reg is None or reg == 0:
             return 0
@@ -724,6 +828,9 @@ def run_pipeline(words: Sequence[int], cfg: Optional[Config] = None,
         if m.instructions >= cfg.max_instructions:
             raise WatchdogError("instruction limit %d exceeded at pc 0x%04X" % (cfg.max_instructions, pc))
 
+        pipe_idx = len(m.pipe)
+        m.pipe.append(None)  # type: ignore[arg-type]
+
         # ---- WB ----------------------------------------------------------
         if mem_wb.valid and mem_wb.dec is not None:
             d = mem_wb.dec
@@ -734,6 +841,7 @@ def run_pipeline(words: Sequence[int], cfg: Optional[Config] = None,
                         mem_wb.wb_value if mem_wb.reg_write else None,
                         mem_wb.mem, 1 if mem_wb.taken else 0, mem_wb.target)
             if mem_wb.is_halt:
+                m.pipe[pipe_idx] = pipe_rec(False, False)  # type: ignore[call-arg]
                 m.final_pc = mem_wb.pc
                 m.halted = True
                 break
@@ -814,6 +922,8 @@ def run_pipeline(words: Sequence[int], cfg: Optional[Config] = None,
 
         if redirect or halt_ex:
             stall = False
+
+        m.pipe[pipe_idx] = pipe_rec(stall, redirect or halt_ex)  # type: ignore[call-arg]
 
         # ---- next pipeline state ----------------------------------------
         next_if = IfId()

@@ -58,224 +58,507 @@ class Generated:
 
 
 class Gen:
+    """Seed-driven program builder.
+
+    Every mode consumes the program's RNG: register allocation, immediates,
+    memory addresses, branch/loop bounds, call graphs and the choice of template
+    variants all come from it.  Two seeds therefore produce different programs in
+    every mode.  The builder only emits valid, terminating programs.
+    """
+
     def __init__(self, seed: int):
         self.seed = seed
         self.rng = random.Random(seed)
         self.lines: List[str] = []
+        self._buf: List[str] = self.lines
         self.n = 0
         self.hazards: Set[str] = set()
+        self.funcs: List[Tuple[str, List[str]]] = []
 
     def emit(self, text: str) -> None:
-        self.lines.append("    " + text)
+        self._buf.append("    " + text)
+
+    def place(self, label: str) -> None:
+        self._buf.append(label + ":")
 
     def label(self, prefix: str = "Lg") -> str:
         self.n += 1
         return "%s_%d" % (prefix, self.n)
 
-    def place(self, label: str) -> None:
-        self.lines.append(label + ":")
-
     def source(self) -> str:
         return "\n".join(self.lines) + "\n"
 
+    # -- operands ----------------------------------------------------------
     def reg(self, exclude: Sequence[str] = ()) -> str:
         choices = [r for r in SAFE if r not in exclude]
+        if not choices:
+            choices = ["t0"]
         return self.rng.choice(choices)
 
-    def imm(self) -> int:
-        return self.rng.randrange(-32768, 32768)
+    def distinct_regs(self, k: int, exclude: Sequence[str] = ()) -> List[str]:
+        pool = [r for r in SAFE if r not in exclude]
+        self.rng.shuffle(pool)
+        while len(pool) < k:
+            pool.append(self.rng.choice(SAFE))
+        return pool[:k]
 
-    def addr(self) -> int:
-        return 0x0100 + (self.rng.randrange(0, 0x0E00) & 0xFFFE)
+    def imm(self, lo: int = -32768, hi: int = 32768) -> int:
+        return self.rng.randrange(lo, hi)
+
+    def addr(self, align: bool = True) -> int:
+        a = 0x0100 + self.rng.randrange(0, 0x0E00)
+        return (a & 0xFFFE) if align else a
+
+    def filler(self, n: int, exclude: Sequence[str] = ()) -> None:
+        for _ in range(n):
+            self.random_alu(exclude=exclude, allow_mem=False)
 
     def random_alu(self, exclude: Sequence[str] = (), allow_mem: bool = True) -> None:
-        kind = self.rng.randrange(4)
+        kind = self.rng.randrange(4 if allow_mem else 2)
         if kind == 0:
-            rd = self.reg(exclude); rs1 = self.reg(exclude); rs2 = self.reg(exclude)
+            rd, rs1, rs2 = self.distinct_regs(3, exclude)
             self.emit("%s %s, %s, %s" % (self.rng.choice(ALU_R), rd, rs1, rs2))
         elif kind == 1:
-            rd = self.reg(exclude); rs1 = self.reg(exclude)
+            rd, rs1 = self.distinct_regs(2, exclude)
             op = self.rng.choice(ALU_I)
             imm = self.rng.randrange(0, 16) if op in ("slli", "srli", "srai") else self.imm()
             self.emit("%s %s, %s, %d" % (op, rd, rs1, imm))
-        elif kind == 2 and allow_mem:
+        elif kind == 2:
             rd = self.reg(exclude)
-            self.emit("li t2, 0x%04X" % self.addr())
-            self.emit("%s %s, 0(t2)" % (self.rng.choice(["lb", "lbu", "lw"]), rd))
-        elif kind == 3 and allow_mem:
+            base = self.reg(tuple(exclude) + (rd,))
+            self.emit("li %s, 0x%04X" % (base, self.addr()))
+            self.emit("%s %s, 0(%s)" % (self.rng.choice(["lb", "lbu", "lw"]), rd, base))
+        else:
             rd = self.reg(exclude)
-            self.emit("li t2, 0x%04X" % self.addr())
-            self.emit("li t3, 0x%04X" % (self.rng.randrange(0x10000)))
-            self.emit("%s %s, 0(t2)" % (self.rng.choice(["sb", "sw"]), rd if self.rng.randrange(2) else "t3"))
+            base = self.reg(tuple(exclude) + (rd,))
+            src = self.reg(tuple(exclude) + (rd, base))
+            self.emit("li %s, 0x%04X" % (base, self.addr()))
+            self.emit("li %s, 0x%04X" % (src, self.rng.randrange(0x10000)))
+            self.emit("%s %s, 0(%s)" % (self.rng.choice(["sb", "sw"]), src, base))
 
-    # ---------------------------------------------------------------- modes
+    # -- dependency templates ---------------------------------------------
+    def dep(self, distance: int) -> None:
+        rd, cons, other = self.distinct_regs(3)
+        self.emit("li %s, %d" % (rd, self.imm(-2048, 2048)))
+        self.filler(distance - 1, exclude=(rd,))
+        self.emit("%s %s, %s, %s" % (self.rng.choice(ALU_R), cons, rd, other))
+        self.hazards.add("dep_d%d" % distance)
+
+    def store_load(self, distance: int, size: str) -> None:
+        # Even address guarantees that SB/LB/LW see the same effective address.
+        addr = self.addr(align=True)
+        base, val, dst = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, addr))
+        self.emit("li %s, 0x%04X" % (val, self.rng.randrange(0x10000)))
+        self.emit("%s %s, 0(%s)" % (size, val, base))
+        self.filler(distance - 1, exclude=(base, val, dst))
+        load = "lw" if size == "sw" else self.rng.choice(["lb", "lbu"])
+        self.emit("%s %s, 0(%s)" % (load, dst, base))
+        self.hazards.add("store_load_same_addr")
+
+    def misaligned_pair(self) -> None:
+        addr = self.addr() | 1
+        base, val, dst = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, addr))
+        self.emit("li %s, 0x%04X" % (val, self.rng.randrange(0x10000)))
+        self.emit("sw %s, 0(%s)" % (val, base))
+        self.emit("lw %s, 0(%s)" % (dst, base))
+
+    # -- modes -------------------------------------------------------------
     def straight(self) -> None:
-        for _ in range(self.rng.randrange(8, 18)):
+        for _ in range(self.rng.randrange(8, 20)):
             self.random_alu()
+        if self.rng.randrange(2):
+            self.dep(self.rng.choice((1, 2, 3)))
+        if self.rng.randrange(2):
+            self.store_load(self.rng.choice((1, 2, 3, 4)),
+                            self.rng.choice(("sb", "sw")))
 
     def loop(self) -> None:
-        n = self.rng.randrange(1, 6)
-        self.emit("li s4, %d" % n)
+        n = self.rng.randrange(1, 7)
+        counter = "s4"
+        self.emit("li %s, %d" % (counter, n))
         top = self.label("Lloop")
         self.place(top)
-        for _ in range(self.rng.randrange(3, 8)):
-            self.random_alu(exclude=("s4",))
-        self.emit("addi s4, s4, -1")
-        self.emit("bnez s4, %s" % top)
+        for _ in range(self.rng.randrange(3, 10)):
+            self.random_alu(exclude=(counter,))
+        if self.rng.randrange(2):
+            self.dep(self.rng.choice((1, 2)))
+        self.emit("addi %s, %s, -1" % (counter, counter))
+        self.emit("bnez %s, %s" % (counter, top))
+
+    def _make_func(self, name: str, callees: Sequence[str]) -> None:
+        old = self._buf
+        self._buf = []
+        if callees:
+            self.emit("addi sp, sp, -2")
+            self.emit("sw lr, 0(sp)")
+        for _ in range(self.rng.randrange(1, 5)):
+            self.random_alu(allow_mem=False)
+        for c in callees:
+            self.emit("call %s" % c)
+        for _ in range(self.rng.randrange(0, 3)):
+            self.random_alu(allow_mem=False)
+        if callees:
+            self.emit("lw lr, 0(sp)")
+            self.emit("addi sp, sp, 2")
+        self.emit("li a0, %d" % self.rng.randrange(0x10000))
+        self.emit("ret")
+        body = self._buf
+        self._buf = old
+        self.funcs.append((name, list(body)))
 
     def calls(self) -> None:
-        self.emit("call fn0")
-        self.emit("call fn1")
-        self.emit("la t0, fn0")
-        self.emit("jalr lr, t0, 0")
-        self.emit("la t0, fn1")
-        self.emit("jalr lr, t0, 0")
-        # functions are appended after main by the caller
+        k = self.rng.randrange(1, 4)
+        names = ["fn%d" % i for i in range(k)]
+        # Acyclic call graph: function i may call only higher-numbered functions.
+        for i in reversed(range(k)):
+            callees = [names[j] for j in range(i + 1, k) if self.rng.randrange(3) == 0]
+            self._make_func(names[i], callees)
+        for _ in range(self.rng.randrange(1, 6)):
+            self.random_alu(allow_mem=False)
+            target = self.rng.choice(names)
+            if self.rng.randrange(2):
+                self.emit("call %s" % target)
+            else:
+                tmp = self.reg()
+                self.emit("la %s, %s" % (tmp, target))
+                self.emit("jalr lr, %s, 0" % tmp)
+        if self.rng.randrange(2):
+            self.emit("la t0, %s" % self.rng.choice(names))
+            self.emit("jalr lr, t0, 0")
 
     def hazard_templates(self) -> None:
-        # 1. distance-1 ALU dependency chain
-        self.emit("li t0, 5")
-        self.emit("add t1, t0, t0")
-        self.emit("add t2, t1, t1")
-        self.emit("add t3, t2, t2")
-        self.hazards.add("dep_d1")
+        # 1. ALU dependencies at distance 1, 2 and 3.
+        for d in (1, 2, 3):
+            self.dep(d)
         # 2. load-use ALU
-        self.emit("li t0, 0x0100")
-        self.emit("lw t1, 0(t0)")
-        self.emit("add t2, t1, t1")
+        base, ld, cons = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw %s, 0(%s)" % (ld, base))
+        self.emit("add %s, %s, %s" % (cons, ld, cons))
         self.hazards.add("load_use_alu")
         # 3. load-use store data
-        self.emit("li t0, 0x0100")
-        self.emit("lw t1, 0(t0)")
-        self.emit("sw t1, 4(t0)")
+        base, ld, data = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw %s, 0(%s)" % (ld, base))
+        self.emit("sw %s, %d(%s)" % (ld, self.rng.choice((2, 4)), base))
         self.hazards.add("load_use_store_data")
         # 4. load-use store address
-        self.emit("li t0, 0x0100")
-        self.emit("li t2, 0x1234")
-        self.emit("lw t1, 0(t0)")
-        self.emit("sw t2, 0(t1)")
+        base, ld, data, dest = self.distinct_regs(4)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("li %s, 0x%04X" % (data, self.addr()))
+        self.emit("sw %s, 0(%s)" % (data, base))
+        self.emit("lw %s, 0(%s)" % (ld, base))
+        self.emit("sw %s, 0(%s)" % (data, ld))
         self.hazards.add("load_use_store_addr")
-        # 5. load-use branch
-        self.emit("li t0, 0x0100")
-        self.emit("lw t1, 0(t0)")
+        # 5. load-use branch operand
+        base, ld, other = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw %s, 0(%s)" % (ld, base))
         lab = self.label("Lbranch")
-        self.emit("beq t1, t0, %s" % lab)
+        self.emit("beq %s, %s, %s" % (ld, other, lab))
         self.place(lab)
         self.hazards.add("load_use_branch")
-        # 6. load-use JALR base (value stored in RAM first)
-        self.emit("li t0, 0x0100")
+        # 6. load-use JALR base (target address is stored in RAM first)
+        base, ld, tmp = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
         target = self.label("Ljalr")
-        self.emit("la t2, %s" % target)
-        self.emit("sw t2, 0(t0)")
-        self.emit("lw t1, 0(t0)")
-        self.emit("jalr r0, t1, 0")
+        self.emit("la %s, %s" % (tmp, target))
+        self.emit("sw %s, 0(%s)" % (tmp, base))
+        self.emit("lw %s, 0(%s)" % (ld, base))
+        self.emit("jalr r0, %s, 0" % ld)
         junk = self.label("Ljunk")
         self.place(junk)
         self.emit("addi s0, s0, 1")
         self.place(target)
         self.hazards.add("load_use_jalr")
         # 7. taken branch over two side effects
-        self.emit("li t0, 1")
+        cond, a, b = self.distinct_regs(3)
+        self.emit("li %s, 1" % cond)
         over = self.label("Lover")
-        self.emit("beq t0, t0, %s" % over)
-        self.emit("addi s0, s0, 1")
-        self.emit("addi s1, s1, 1")
+        self.emit("beq %s, %s, %s" % (cond, cond, over))
+        self.emit("addi %s, %s, 1" % (a, a))
+        self.emit("addi %s, %s, 1" % (b, b))
         self.place(over)
         self.hazards.add("branch_over_side_effect")
-        # 8. JAL dependents
-        self.emit("jal r15, fn0")
-        self.emit("add t0, r15, r15")
+        # 8. JAL link consumed by the next dynamic instruction (distance 1).
+        #    Target = PC+1, so the consumer is re-fetched and retires next.
+        consumer, other = self.distinct_regs(2)
+        self.emit("jal r15, .+1")
+        self.emit("add %s, r15, %s" % (consumer, other))
         self.hazards.add("jal_dependent")
-        # 9. JALR dependents
-        self.emit("la t0, fn1")
-        self.emit("jalr r15, t0, 0")
-        self.emit("add t1, r15, r15")
+        # 9. JALR link consumed by the next dynamic instruction (distance 1).
+        tmp, consumer, other = self.distinct_regs(3)
+        self.emit("la %s, .+2" % tmp)
+        self.emit("jalr r15, %s, 0" % tmp)
+        self.emit("add %s, r15, %s" % (consumer, other))
         self.hazards.add("jalr_dependent")
         # 10. R0 writes
-        self.emit("add r0, t0, t1")
-        self.emit("addi r0, r0, 1")
+        a, b = self.distinct_regs(2)
+        self.emit("add r0, %s, %s" % (a, b))
+        self.emit("addi r0, r0, %d" % self.imm(-64, 64))
         self.hazards.add("r0_write")
-        # 11. store followed by load of the same address
-        self.emit("li t0, 0x0200")
-        self.emit("li t1, 0x1234")
-        self.emit("sw t1, 0(t0)")
-        self.emit("lw t2, 0(t0)")
-        self.hazards.add("store_load_same_addr")
-        # 12. distance 2 and 3 dependencies
-        self.emit("li t0, 7")
-        self.emit("nop")
-        self.emit("add t1, t0, t0")
-        self.hazards.add("dep_d2")
-        self.emit("nop")
-        self.emit("nop")
-        self.emit("add t2, t0, t0")
-        self.hazards.add("dep_d3")
+        # 11. store -> load of the same address at distances 1..4, byte and word.
+        for d in (1, 2, 3, 4):
+            self.store_load(d, self.rng.choice(("sb", "sw")))
+        # 12. load into R0: the value must be discarded and R0 must read zero.
+        base, tmp = self.distinct_regs(2)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw r0, 0(%s)" % base)
+        self.emit("add %s, r0, r0" % tmp)
+        # 13. byte-lane and misaligned combinations.
+        self.misaligned_pair()
+        base, val, dst = self.distinct_regs(3)
+        self.emit("li %s, 0x%04X" % (base, self.addr() & 0xFFFE))
+        self.emit("li %s, 0x%04X" % (val, self.rng.randrange(0x100)))
+        self.emit("sb %s, 0(%s)" % (val, base))
+        self.emit("lbu %s, 0(%s)" % (dst, base))
+        self.emit("lb %s, 1(%s)" % (dst, base))
+        # 14. HALT in the shadow of a taken branch and of a JAL: the HALT must
+        #     be squashed and must not stop the machine.
+        cond = self.reg()
+        lab = self.label("Lhalt_shadow")
+        self.emit("li %s, 1" % cond)
+        self.emit("beq %s, %s, %s" % (cond, cond, lab))
+        self.emit("halt")
+        self.place(lab)
+        self.emit("addi %s, %s, 1" % (self.reg(), self.reg()))
+        lab = self.label("Ljal_halt")
+        self.emit("jal r15, %s" % lab)
+        self.emit("halt")
+        self.place(lab)
+        # 14. filler between template groups for extra diversity.
+        self.filler(self.rng.randrange(0, 4))
 
     def mmio(self) -> None:
-        self.emit("li t0, GPIO_OUT")
-        self.emit("li t1, 0x1234")
-        self.emit("sw t1, 0(t0)")
-        self.emit("lw t2, 0(t0)")
-        self.emit("li t0, GPIO_IN")
-        self.emit("lw t3, 0(t0)")
-        self.emit("li t0, TIMER")
-        self.emit("lw t1, 0(t0)")
-        self.emit("li t0, UART_TX")
-        self.emit("li t1, 0x41")
-        self.emit("sw t1, 0(t0)")
-        self.emit("li t0, UART_STATUS")
-        self.emit("lw t2, 0(t0)")
+        regs = self.distinct_regs(4)
+        addr_r, val_r, out_r, status_r = regs
+        self.emit("li %s, GPIO_OUT" % addr_r)
+        self.emit("li %s, 0x%04X" % (val_r, self.rng.randrange(0x10000)))
+        self.emit("sw %s, 0(%s)" % (val_r, addr_r))
+        self.emit("lw %s, 0(%s)" % (out_r, addr_r))
+        self.emit("li %s, GPIO_IN" % addr_r)
+        self.emit("lw %s, 0(%s)" % (out_r, addr_r))
+        self.emit("li %s, TIMER" % addr_r)
+        self.emit("lw %s, 0(%s)" % (val_r, addr_r))
+        self.emit("li %s, UART_TX" % addr_r)
+        self.emit("li %s, 0x%04X" % (val_r, self.rng.randrange(0x100)))
+        self.emit("sw %s, 0(%s)" % (val_r, addr_r))
+        self.emit("li %s, UART_STATUS" % addr_r)
+        self.emit("lw %s, 0(%s)" % (status_r, addr_r))
+        if self.rng.randrange(2):
+            self.random_alu(allow_mem=False)
 
     def mmio_writes(self) -> None:
         # Write-only MMIO: GPIO_OUT and UART_TX, plus a stable GPIO_OUT read.
         # No TIMER/UART_STATUS/GPIO_IN reads, so a 5A trace is not
         # cycle_sensitive (the fuzzer uses UART_CYCLES_PER_BYTE=0).
-        self.emit("li t0, GPIO_OUT")
-        self.emit("li t1, 0x%04X" % self.rng.randrange(0x10000))
-        self.emit("sw t1, 0(t0)")
-        self.emit("lw t2, 0(t0)")
-        self.emit("li t3, 0x%04X" % (0xFF05,))
-        self.emit("li a0, 0x%04X" % self.rng.randrange(0x10000))
-        self.emit("sb a0, 0(t3)")
-        self.emit("li a1, UART_TX")
-        self.emit("li a2, 0x%04X" % self.rng.randrange(0x100))
-        self.emit("sw a2, 0(a1)")
+        a, v, out_r, b = self.distinct_regs(4)
+        self.emit("li %s, GPIO_OUT" % a)
+        self.emit("li %s, 0x%04X" % (v, self.rng.randrange(0x10000)))
+        self.emit("sw %s, 0(%s)" % (v, a))
+        self.emit("lw %s, 0(%s)" % (out_r, a))
+        self.emit("li %s, 0x%04X" % (b, 0xFF05))
+        self.emit("li %s, 0x%04X" % (a, self.rng.randrange(0x10000)))
+        self.emit("sb %s, 0(%s)" % (a, b))
+        self.emit("li %s, UART_TX" % (b,))
+        self.emit("li %s, 0x%04X" % (v, self.rng.randrange(1, 0x100)))
+        self.emit("sw %s, 0(%s)" % (v, b))
+        # Second write while the transmitter is busy: dropped by hardware.  The
+        # two stores are back-to-back, so the busy window covers the second write
+        # in both the forwarding and the stall-only machine.
+        self.emit("li %s, 0x%04X" % (a, self.rng.randrange(1, 0x100)))
+        self.emit("sw %s, 0(%s)" % (a, b))
+        if self.rng.randrange(2):
+            self.random_alu(allow_mem=False)
+
+
+    # -- forwarding-targeted mode -----------------------------------------
+    def _fwd_consumer(self, form: str, rd: str, other: str, out: str) -> None:
+        if form == "alu_a":
+            self.emit("add %s, %s, %s" % (out, rd, other))
+        elif form == "alu_b":
+            self.emit("add %s, %s, %s" % (out, other, rd))
+        elif form == "store_data":
+            base = self.reg((rd, other, out))
+            self.emit("li %s, 0x%04X" % (base, self.addr()))
+            self.emit("sw %s, 0(%s)" % (rd, base))
+        elif form == "store_addr":
+            self.emit("li %s, 0x%04X" % (other, self.addr()))
+            self.emit("sw %s, 0(%s)" % (out, rd))
+        elif form == "branch":
+            lab = self.label("Lfwb")
+            self.emit("beq %s, %s, %s" % (rd, rd, lab))
+            self.place(lab)
+        elif form == "jalr":
+            lab = self.label("Lfwj")
+            self.emit("jalr r0, %s, 0" % rd)
+            junk = self.label("Lfwjunk")
+            self.place(junk)
+            self.emit("addi %s, %s, 1" % (out, out))
+            self.place(lab)
+            self.emit("addi %s, %s, 1" % (out, out))
+
+    def fwd_scenario(self) -> None:
+        form = self.rng.choice(("alu_a", "alu_b", "store_data", "store_addr",
+                                "branch", "jalr"))
+        kind = self.rng.choice(("alu", "load", "load_byte", "mmio", "link"))
+        # A JALR target and a store address must be a real, in-range value; use a
+        # loaded address rather than an arbitrary ALU/MMIO value so programs
+        # always terminate.
+        if form in ("store_addr", "jalr") and kind not in ("load", "link"):
+            kind = "load"
+        distance = self.rng.choice((1, 2, 3, 4))
+        rd, other, out = self.distinct_regs(3)
+        base = self.reg((rd, other, out))
+        if kind == "alu":
+            self.emit("li %s, %d" % (rd, self.imm(-2048, 2048)))
+        elif kind in ("load", "load_byte"):
+            scratch = self.addr()
+            self.emit("li %s, 0x%04X" % (base, scratch))
+            if form in ("store_addr", "jalr"):
+                dest = self.addr()
+                self.emit("li %s, 0x%04X" % (other, dest))
+                self.emit("sw %s, 0(%s)" % (other, base))
+            elif self.rng.randrange(2):
+                self.emit("li %s, 0x%04X" % (other, self.rng.randrange(0x10000)))
+                self.emit("sw %s, 0(%s)" % (other, base))
+            op = "lb" if kind == "load_byte" else "lw"
+            self.emit("%s %s, 0(%s)" % (op, rd, base))
+        elif kind == "mmio":
+            reg = self.rng.choice(("TIMER", "UART_STATUS", "GPIO_IN"))
+            self.emit("li %s, %s" % (base, reg))
+            self.emit("lw %s, 0(%s)" % (rd, base))
+        else:  # link
+            target = self.label("Llink")
+            self.emit("jal r15, %s" % target)
+            self.filler(max(0, distance - 1), exclude=(rd,))
+            self.place(target)
+            self.emit("add %s, r15, %s" % (out, other))
+            if self.rng.randrange(2):
+                self.emit("addi %s, %s, 1" % (out, out))
+            return
+        self.filler(max(0, distance - 1), exclude=(rd,))
+        self._fwd_consumer(form, rd, other, out)
+
+    def fwd_specials(self) -> None:
+        # Distance-1 load-use for every consumer form, so the stall counters are
+        # exercised directly rather than only by chance.
+        base, val, rd, out = self.distinct_regs(4)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("li %s, 0x%04X" % (val, self.rng.randrange(0x10000)))
+        self.emit("sw %s, 0(%s)" % (val, base))
+        self.emit("lw %s, 0(%s)" % (rd, base))
+        self.emit("sw %s, 2(%s)" % (rd, base))
+        # load -> store address
+        base, val, rd = self.distinct_regs(3)
+        scratch = self.addr()
+        dest = self.addr()
+        self.emit("li %s, 0x%04X" % (base, scratch))
+        self.emit("li %s, 0x%04X" % (val, dest))
+        self.emit("sw %s, 0(%s)" % (val, base))
+        self.emit("lw %s, 0(%s)" % (rd, base))
+        self.emit("sw %s, 0(%s)" % (val, rd))
+        # load -> branch operand
+        base, rd = self.distinct_regs(2)
+        lab = self.label("Llu_br")
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw %s, 0(%s)" % (rd, base))
+        self.emit("beq %s, %s, %s" % (rd, rd, lab))
+        self.place(lab)
+        # load -> JALR base
+        base, rd, tmp = self.distinct_regs(3)
+        lab = self.label("Llu_jr")
+        junk = self.label("Llu_junk")
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("la %s, %s" % (tmp, lab))
+        self.emit("sw %s, 0(%s)" % (tmp, base))
+        self.emit("lw %s, 0(%s)" % (rd, base))
+        self.emit("jalr r0, %s, 0" % rd)
+        self.place(junk)
+        self.emit("addi %s, %s, 1" % (tmp, tmp))
+        self.place(lab)
+        # Double producer: EX/MEM must beat MEM/WB.
+        rd, out = self.distinct_regs(2)
+        self.emit("li %s, %d" % (rd, self.rng.randrange(1, 100)))
+        self.emit("addi %s, %s, %d" % (rd, rd, self.rng.randrange(1, 100)))
+        self.emit("add %s, %s, %s" % (out, rd, rd))
+        # R0 as producer and consumer.
+        a, b = self.distinct_regs(2)
+        self.emit("li %s, %d" % (a, self.rng.randrange(1, 100)))
+        self.emit("add r0, %s, %s" % (a, a))
+        self.emit("add %s, r0, %s" % (b, a))
+        # Producer in a flushed branch shadow.
+        rd, out = self.distinct_regs(2)
+        lab = self.label("Lshadow")
+        self.emit("li %s, 5" % rd)
+        self.emit("beq r0, r0, %s" % lab)
+        self.emit("addi %s, r0, 99" % rd)
+        self.place(lab)
+        self.emit("add %s, %s, r0" % (out, rd))
+        # Load -> load pointer chain.
+        base, p1, p2 = self.distinct_regs(3)
+        scratch = self.addr()
+        dest = self.addr()
+        self.emit("li %s, 0x%04X" % (base, scratch))
+        self.emit("li %s, 0x%04X" % (p1, dest))
+        self.emit("sw %s, 0(%s)" % (p1, base))
+        self.emit("lw %s, 0(%s)" % (p1, base))
+        self.emit("lw %s, 0(%s)" % (p2, p1))
+        # HALT after a load.
+        base, ld = self.distinct_regs(2)
+        self.emit("li %s, 0x%04X" % (base, self.addr()))
+        self.emit("lw %s, 0(%s)" % (ld, base))
+        self.emit("halt")
 
     def coverage(self) -> None:
-        self.emit("li t0, 1")
-        self.emit("li t1, 2")
-        self.emit("li t2, 0x0100")
-        self.emit("li t3, 0x1234")
+        # One executed instance of every assigned opcode, with seed-driven
+        # operands.  The opcode set is fixed by the ISA, not by the seed.
+        a, b, c, d = self.distinct_regs(4)
+        self.emit("li %s, %d" % (a, self.rng.randrange(0x10000)))
+        self.emit("li %s, %d" % (b, self.rng.randrange(0x10000)))
+        self.emit("li %s, 0x%04X" % (c, self.addr()))
+        self.emit("li %s, 0x%04X" % (d, self.rng.randrange(0x10000)))
         for op in ALU_R:
-            self.emit("%s t0, t1, t2" % op)
+            rd = self.reg()
+            self.emit("%s %s, %s, %s" % (op, rd, self.reg(), self.reg()))
         for op in ALU_I:
-            imm = 3 if op in ("slli", "srli", "srai") else -7
-            self.emit("%s t0, t1, %d" % (op, imm))
-        self.emit("sw t3, 0(t2)")
-        self.emit("lw t0, 0(t2)")
-        self.emit("sb t3, 2(t2)")
-        self.emit("lb t0, 2(t2)")
-        self.emit("lbu t1, 2(t2)")
+            rd = self.reg()
+            imm = self.rng.randrange(0, 16) if op in ("slli", "srli", "srai") else self.imm()
+            self.emit("%s %s, %s, %d" % (op, rd, self.reg(), imm))
+        self.emit("li %s, 0x%04X" % (c, self.addr()))
+        self.emit("sw %s, 0(%s)" % (d, c))
+        self.emit("lw %s, 0(%s)" % (a, c))
+        self.emit("sb %s, 0(%s)" % (d, c))
+        self.emit("lb %s, 0(%s)" % (a, c))
+        self.emit("lbu %s, 1(%s)" % (b, c))
+        self.emit("li %s, 0x%04X" % (a, self.rng.randrange(0x10000)))
+        self.emit("li %s, 0x%04X" % (b, self.rng.randrange(0x10000)))
         for op in ("beq", "bne", "blt", "bge", "bltu", "bgeu"):
             lab = self.label("Lcov")
-            self.emit("%s t0, t1, %s" % (op, lab))
+            self.emit("%s %s, %s, %s" % (op, a, b, lab))
             self.place(lab)
         lab = self.label("Ljal")
         self.emit("jal r15, %s" % lab)
         self.place(lab)
         lab = self.label("Ljalr")
-        self.emit("la t0, %s" % lab)
-        self.emit("jalr r0, t0, 0")
+        self.emit("la %s, %s" % (a, lab))
+        self.emit("jalr r0, %s, 0" % a)
         self.place(lab)
+        self.filler(self.rng.randrange(0, 3))
         self.emit("halt")
 
+    def fwd(self) -> None:
+        for _ in range(self.rng.randrange(6, 11)):
+            self.fwd_scenario()
+        self.fwd_specials()
 
-def _append_functions(g: Gen, names: Sequence[str]) -> None:
-    for i, name in enumerate(names):
-        g.lines.append("")
-        g.lines.append("%s:" % name)
-        g.emit("li a0, %d" % (i + 1))
-        g.emit("ret")
+    def append_functions(self) -> None:
+        for name, body in self.funcs:
+            self.lines.append("")
+            self.lines.append("%s:" % name)
+            self.lines.extend(body)
 
 
 def generate(seed: int, mode: Optional[str] = None) -> Generated:
@@ -301,6 +584,8 @@ def generate(seed: int, mode: Optional[str] = None) -> Generated:
         g.mmio()
     elif mode == "mmio_writes":
         g.mmio_writes()
+    elif mode == "fwd":
+        g.fwd()
     elif mode == "coverage":
         g.coverage()
     else:
@@ -310,10 +595,7 @@ def generate(seed: int, mode: Optional[str] = None) -> Generated:
         g.emit("lw lr, 0(sp)")
         g.emit("addi sp, sp, 2")
         g.emit("ret")
-    if mode == "calls":
-        _append_functions(g, ["fn0", "fn1"])
-    if mode in ("hazards",):
-        _append_functions(g, ["fn0", "fn1"])
+    g.append_functions()
     return Generated(seed, mode, g.source(), sorted(g.hazards))
 
 

@@ -85,7 +85,13 @@ begin
       retire_mem_kind => retire_mem_kind, retire_mem_addr => retire_mem_addr,
       retire_mem_size => retire_mem_size, retire_mem_data => retire_mem_data,
       retire_taken => retire_taken, retire_target => retire_target,
-      retire_halt => retire_halt, cov => open);
+      retire_halt => retire_halt,
+      pipe_id_valid => open, pipe_id_pc => open,
+      pipe_ex_valid => open, pipe_ex_pc => open,
+      pipe_mem_valid => open, pipe_mem_pc => open,
+      pipe_wb_valid => open, pipe_wb_pc => open,
+      pipe_stall => open, pipe_flush => open,
+      cov => open);
 
   process
     variable checks : integer := 0;

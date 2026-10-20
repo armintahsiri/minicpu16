@@ -139,6 +139,47 @@ def parse_state(path: Path) -> Dict[str, object]:
     return d
 
 
+def parse_pipe(path: Path) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) != 11:
+            raise ValueError("%s: expected 11 pipeview fields, got %d" % (path, len(parts)))
+        rows.append(parts)
+    return rows
+
+
+PIPE_NAMES = ["cycle", "id_v", "id_pc", "ex_v", "ex_pc", "mem_v", "mem_pc",
+              "wb_v", "wb_pc", "stall", "flush"]
+
+
+def diff_pipe(gold: List[List[str]], rtl: List[List[str]]) -> Tuple[bool, str]:
+    n = max(len(gold), len(rtl))
+    for i in range(n):
+        if i >= len(gold):
+            return False, "rtl pipeview has an extra cycle %s" % (rtl[i][0],)
+        if i >= len(rtl):
+            return False, "rtl pipeview ended at cycle %s; model has %s" % (
+                len(rtl), len(gold))
+        # PC is only architecturally meaningful while the stage is valid.  When
+        # both sides agree the stage is empty, a stale PC in the RTL register is
+        # irrelevant (the model clears it).
+        pc_pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+        skip = set()
+        for v_idx, pc_idx in pc_pairs:
+            if gold[i][v_idx] == "0" and rtl[i][v_idx] == "0":
+                skip.add(pc_idx)
+        diffs = ["%s model=%s rtl=%s" % (PIPE_NAMES[k], gold[i][k], rtl[i][k])
+                 for k in range(11) if k not in skip and gold[i][k] != rtl[i][k]]
+        if diffs:
+            return False, "first pipeview divergence at line %d (cycle %s): %s" % (
+                i + 1, gold[i][0], "; ".join(diffs))
+    return True, "pipeview identical over %d cycles" % len(gold)
+
+
 def parse_expected(path: Path) -> Dict[str, object]:
     d: Dict[str, object] = {"regs": {}, "ram": []}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -161,12 +202,17 @@ def parse_expected(path: Path) -> Dict[str, object]:
             d["halted"] = parts[1] == "1"
         elif key == "instructions":
             d["instructions"] = int(parts[1])
+        elif key == "cycles":
+            d["cycles"] = int(parts[1])
+        elif key == "stalls":
+            d["stalls"] = int(parts[1])
         else:
             raise ValueError("bad expected line: %r" % s)
     return d
 
 
-def compare_expected(exp: Dict[str, object], got: Dict[str, object]) -> List[str]:
+def compare_expected(exp: Dict[str, object], got: Dict[str, object],
+                    ignore_cycles: bool = False) -> List[str]:
     errs: List[str] = []
     for reg, want in exp.get("regs", {}).items():
         g = got["regs"].get(reg, 0)
@@ -182,6 +228,15 @@ def compare_expected(exp: Dict[str, object], got: Dict[str, object]) -> List[str
         errs.append("halted: got %r want %r" % (got.get("halted"), exp["halted"]))
     if "instructions" in exp and int(got.get("instructions", -1)) != exp["instructions"]:
         errs.append("instructions: got %r want %r" % (got.get("instructions"), exp["instructions"]))
+    # Cycle and stall expectations are contract-timing assertions.  The
+    # architectural (stall-only) comparison deliberately ignores timing, so the
+    # expected file's cycles/stalls lines are not asserted in that mode; the
+    # cycle-exact run asserts them.
+    if not ignore_cycles:
+        if "cycles" in exp and int(got.get("cycles", -1)) != exp["cycles"]:
+            errs.append("cycles: got %r want %r" % (got.get("cycles"), exp["cycles"]))
+        if "stalls" in exp and int(got.get("stalls", -1)) != exp["stalls"]:
+            errs.append("stalls: got %r want %r" % (got.get("stalls"), exp["stalls"]))
     ram = str(got.get("ram", ""))
     for addr, hx in exp.get("ram", []):
         off = addr * 2
@@ -223,7 +278,8 @@ def ensure_built(rtl_dir: Path, sim: str, work: Path, ghdl: str,
         r = _run(cmd, work)
         if r.returncode != 0:
             raise RuntimeError("GHDL analyse failed:\n" + r.stdout)
-        cmd = [ghdl, "-e", "--std=08", "--workdir=" + str(work.resolve()), "tb_cpu"]
+        cmd = [ghdl, "-e", "--std=08",
+               "--workdir=" + str(work.resolve()), "tb_cpu"]
         r = _run(cmd, work)
         if r.returncode != 0:
             raise RuntimeError("GHDL elaborate failed:\n" + r.stdout)
@@ -241,12 +297,14 @@ def run_rtl(
     data_path: Path,
     trace_path: Path,
     state_path: Path,
+    pipe_path: Path,
     instr_words: int,
     ram_bytes: int,
     uart_cycles: int,
     max_cycles: int,
     forwarding: bool,
     gpio_in: int,
+    gpio_schedule: Optional[Path] = None,
     rebuild: bool = False,
 ) -> Dict[str, object]:
     ensure_built(rtl_dir, sim, work, ghdl, rebuild=rebuild)
@@ -255,6 +313,7 @@ def run_rtl(
         "-gDATA_HEX=" + str(data_path.resolve()),
         "-gTRACE_OUT=" + str(trace_path.resolve()),
         "-gSTATE_OUT=" + str(state_path.resolve()),
+        "-gPIPE_OUT=" + str(pipe_path.resolve()),
         "-gMAX_CYCLES=" + str(max_cycles),
         "-gFORWARDING=" + ("true" if forwarding else "false"),
         "-gUART_CYCLES_PER_BYTE=" + str(uart_cycles),
@@ -263,6 +322,8 @@ def run_rtl(
         "-gGPIO_IN_VALUE=" + str(gpio_in),
         "-gCOUNTING=true",
     ]
+    if gpio_schedule is not None:
+        generics.append("-gGPIO_SCHEDULE=" + str(Path(gpio_schedule).resolve()))
     t0 = time.time()
     if sim == "nvc":
         cmd = ["nvc", "--std=08", "-L", str(work.resolve()), "-e", "tb_cpu"] + generics
@@ -272,7 +333,9 @@ def run_rtl(
         cmd = ["nvc", "--std=08", "-L", str(work.resolve()), "-r", "tb_cpu"]
         r = _run(cmd, work)
     else:
-        cmd = [ghdl, "-r", "--std=08", "--workdir=" + str(work.resolve()), "tb_cpu"] + generics
+        cmd = [ghdl, "-r", "--std=08",
+               "--workdir=" + str(work.resolve()), "tb_cpu"] + generics + [
+               "--max-stack-alloc=8192"]
         r = _run(cmd, work)
     elapsed = time.time() - t0
     if r.returncode != 0:
@@ -294,7 +357,9 @@ def run_case(
     max_cycles: int = 200000,
     forwarding: bool = False,
     gpio_in: int = 0,
+    gpio_schedule: Optional[Path] = None,
     ignore_cycles: bool = True,
+    compare_pipe: bool = True,
     expected: Optional[Path] = None,
     ghdl: Optional[str] = None,
     rebuild: bool = False,
@@ -313,7 +378,13 @@ def run_case(
     gold_json = case_dir / "golden.json"
     rtl_trace = case_dir / "rtl.trace"
     rtl_state = case_dir / "rtl.state"
+    rtl_pipe = case_dir / "rtl.pipe"
+    gold_pipe = case_dir / "golden.pipe"
     ghdl = find_ghdl(ghdl)
+
+    gpio_sched = None
+    if gpio_schedule is not None:
+        gpio_sched = isa_sim.load_gpio_schedule(str(gpio_schedule))
 
     img = assemble(sources, runtime, instr_words, ram_bytes)
     hex_path.write_text(img.hex_text(), encoding="utf-8")
@@ -323,13 +394,18 @@ def run_case(
         instr_words=instr_words,
         ram_bytes=ram_bytes,
         uart_cycles_per_byte=uart_cycles,
-        gpio_in=gpio_in,
+        gpio_in=(gpio_sched if gpio_sched is not None else gpio_in),
         max_cycles=max_cycles,
         ram_init=img.data,
     )
-    gold = isa_sim.run_pipeline(img.instr_words, cfg)
+    try:
+        gold = isa_sim.run_pipeline(img.instr_words, cfg)
+    except Exception as e:  # noqa: BLE001 - a non-terminating program is a result
+        out["error"] = "golden model: %s" % e
+        return out
     gold_trace.write_text(gold.trace_text(), encoding="utf-8")
     gold_json.write_text(gold.to_json() + "\n", encoding="utf-8")
+    gold_pipe.write_text(gold.pipe_text(), encoding="utf-8")
 
     out: Dict[str, object] = {
         "name": name,
@@ -344,12 +420,13 @@ def run_case(
         "gold_flushes": gold.flushes,
         "trace_path": str(rtl_trace),
         "state_path": str(rtl_state),
+        "pipe_path": str(rtl_pipe),
         "ok": False,
     }
     try:
         run_rtl(sim, rtl_dir, workroot / (sim + "_lib"), ghdl, hex_path, data_path,
-                rtl_trace, rtl_state, instr_words, ram_bytes, uart_cycles,
-                max_cycles, forwarding, gpio_in, rebuild=rebuild)
+                rtl_trace, rtl_state, rtl_pipe, instr_words, ram_bytes, uart_cycles,
+                max_cycles, forwarding, gpio_in, gpio_schedule, rebuild=rebuild)
     except Exception as e:  # noqa: BLE001 - report, do not crash the suite
         out["error"] = str(e)
         return out
@@ -394,7 +471,24 @@ def run_case(
                              b[idx:idx + 4] if idx is not None else b[:8]))
     if int(g["flushes"]) != int(state.get("flushes", -1)):
         state_errors.append("flushes: golden=%d rtl=%s" % (g["flushes"], state.get("flushes")))
+    if not ignore_cycles:
+        if int(state.get("cycles", -1)) != int(gold.cycles):
+            state_errors.append("cycles: golden=%d rtl=%s" %
+                                (gold.cycles, state.get("cycles")))
+        if int(state.get("stalls", -1)) != int(gold.stalls):
+            state_errors.append("stalls: golden=%d rtl=%s" %
+                                (gold.stalls, state.get("stalls")))
     out["state_errors"] = state_errors
+
+    pipe_ok = True
+    pipe_msg = "pipeview not compared"
+    if compare_pipe and not ignore_cycles and rtl_pipe.exists() and gold_pipe.exists():
+        try:
+            pipe_ok, pipe_msg = diff_pipe(parse_pipe(gold_pipe), parse_pipe(rtl_pipe))
+        except Exception as e:  # noqa: BLE001
+            pipe_ok, pipe_msg = False, "pipeview parse error: %s" % e
+    out["pipe_ok"] = pipe_ok
+    out["pipe_message"] = pipe_msg
 
     gt = trace_diff.parse_trace(str(gold_trace))
     rt = trace_diff.parse_trace(str(rtl_trace))
@@ -422,9 +516,10 @@ def run_case(
 
     exp_errors: List[str] = []
     if expected is not None:
-        exp_errors = compare_expected(parse_expected(Path(expected)), state)
+        exp_errors = compare_expected(parse_expected(Path(expected)), state,
+                                      ignore_cycles=ignore_cycles)
         out["expected_errors"] = exp_errors
-    out["ok"] = bool(ok_trace and not state_errors and not exp_errors)
+    out["ok"] = bool(ok_trace and not state_errors and not exp_errors and pipe_ok)
     return out
 
 
@@ -446,6 +541,8 @@ def print_result(res: Dict[str, object]) -> None:
         if res.get("expected_errors"):
             for e in res["expected_errors"]:
                 print("  expected: " + e)
+        if not res.get("pipe_ok", True):
+            print("  pipeview: " + str(res.get("pipe_message")))
         if not res.get("trace_ok"):
             print("  " + str(res.get("trace_message")).replace("\n", "\n  "))
             div = res.get("divergence")
@@ -470,8 +567,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--ram-bytes", type=lambda s: int(s, 0), default=4096)
     p.add_argument("--uart-cycles", type=int, default=10)
     p.add_argument("--max-cycles", type=int, default=200000)
-    p.add_argument("--forwarding", action="store_true")
+    p.add_argument("--forwarding", dest="forwarding", action="store_true", default=True)
+    p.add_argument("--no-forwarding", dest="forwarding", action="store_false")
     p.add_argument("--gpio-in", type=lambda s: int(s, 0), default=0)
+    p.add_argument("--gpio-schedule", help="GPIO_IN cycle/value schedule file")
+    p.add_argument("--no-pipe", dest="compare_pipe", action="store_false", default=True)
     p.add_argument("--check-cycles", action="store_true",
                    help="also compare retire cycles (5B only)")
     p.add_argument("--expected", help="hand-computed expected final-state file")
@@ -487,7 +587,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             instr_words=ns.instr_words, ram_bytes=ns.ram_bytes,
             uart_cycles=ns.uart_cycles, max_cycles=ns.max_cycles,
             forwarding=ns.forwarding, gpio_in=ns.gpio_in,
-            ignore_cycles=not ns.check_cycles,
+            gpio_schedule=Path(ns.gpio_schedule) if ns.gpio_schedule else None,
+            ignore_cycles=not ns.check_cycles, compare_pipe=ns.compare_pipe,
             expected=Path(ns.expected) if ns.expected else None,
             ghdl=ns.ghdl, rebuild=ns.rebuild, keep=ns.keep)
     except Exception as e:  # noqa: BLE001

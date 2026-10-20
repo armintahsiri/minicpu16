@@ -208,7 +208,7 @@ package minicpu16_pkg is
   -- false.  The CPU testbench writes them to its state file for the fuzz
   -- coverage table.
   -- ---------------------------------------------------------------------
-  constant COV_N : integer := 16;
+  constant COV_N : integer := 36;
   type cov_counters_t is array (0 to COV_N - 1) of std_logic_vector(31 downto 0);
   subtype cov_t is cov_counters_t;
 
@@ -228,6 +228,27 @@ package minicpu16_pkg is
   constant COV_STALL_LOAD_USE   : integer := 13;
   constant COV_FLUSH_BRANCH     : integer := 14;
   constant COV_FLUSH_JUMP       : integer := 15;
+
+  -- Phase 5B forwarding-targeted counters.
+  constant COV_FWD_EXMEM_A      : integer := 16;
+  constant COV_FWD_EXMEM_B      : integer := 17;
+  constant COV_FWD_MEMWB_A      : integer := 18;
+  constant COV_FWD_MEMWB_B      : integer := 19;
+  constant COV_FWD_BRANCH       : integer := 20;
+  constant COV_FWD_STORE_DATA   : integer := 21;
+  constant COV_FWD_STORE_ADDR   : integer := 22;
+  constant COV_FWD_JALR_BASE    : integer := 23;
+  constant COV_FWD_PRIORITY     : integer := 24;
+  constant COV_FWD_R0_SOURCE    : integer := 25;
+  constant COV_STALL_LU_ALU     : integer := 26;
+  constant COV_STALL_LU_STORE_DATA : integer := 27;
+  constant COV_STALL_LU_STORE_ADDR : integer := 28;
+  constant COV_STALL_LU_BRANCH  : integer := 29;
+  constant COV_STALL_LU_JALR    : integer := 30;
+  constant COV_STALL_NEAR_FLUSH : integer := 31;
+  constant COV_FWD_LB_SEXT      : integer := 32;
+  constant COV_FWD_LINK         : integer := 33;
+  constant COV_FWD_FROM_BUBBLE  : integer := 34;
 
   -- Sign-extend a 16-bit pattern to a 16-bit signed pattern.  This is the
   -- identity as a bit pattern, but it documents the branch/address/JALR rule

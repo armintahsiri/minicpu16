@@ -577,3 +577,292 @@ Measured Phase 5A results (NVC unless stated):
   UP5K 25.58 MHz (FAIL at 50), seed 1, no tuning.
 
 The exact per-case numbers are in the final report; they are not repeated here.
+
+
+---
+
+# Phase 5B RTL Architecture (as built)
+
+Status: **Phase 5B design record, verified cycle-exactly in simulation**.  This
+section is subordinate to `docs/ISA.md` and `docs/MICROARCH_CONTRACT.md`; where
+they disagree, the ISA wins and the disagreement is a bug in
+`docs/RTL_FINDINGS.md`.  The Phase 5B machine is the same five-stage pipeline
+with forwarding enabled by default (`FORWARDING = true`); `FORWARDING = false`
+remains as a regression configuration and is compared architecturally only.
+
+## 6. Forwarding network
+
+The forwarding unit's producer inputs are the instructions in **MEM** (the
+EX/MEM register) and **WB** (the MEM/WB register).  Its consumer inputs are the
+source-register numbers of the instruction in **EX** (the ID/EX register).  The
+muxes select the EX operands:
+
+```
+a_ex = ID/EX.rs1_val | EX/MEM.result | WB value
+b_ex = ID/EX.rs2_val | EX/MEM.result | WB value
+```
+
+`WB value` is the same value the register file would write: the load data after
+byte selection and sign/zero extension, the MMIO read data, or the ALU/link
+result.
+
+### 6.1 Producer x consumer x distance
+
+| Producer (class) | Produced value in EX/MEM | Produced value in MEM/WB | Into consumer operand at distance 1 | distance 2 | distance 3 |
+|---|---|---|---|---|---|
+| ALU (ADD..SLTU, ADDI..SLTIU) | `result_ex = alu_result` | `mem_wb_result` | EX/MEM -> EX | MEM/WB -> EX | WB -> ID write-through |
+| Load (LB/LBU/LW) | **not forwarded** (only the address is there) | `wb_value` = aligned/extended data | **not forwarded; 1-cycle stall** | MEM/WB -> EX | WB -> ID write-through |
+| MMIO read (load from 0xFFxx) | **not forwarded** | `mmio_rdata_q` (the captured read) | **not forwarded; 1-cycle stall** | MEM/WB -> EX | WB -> ID write-through |
+| JAL / JALR link | `result_ex = pc+1` | `mem_wb_result` | EX/MEM -> EX | MEM/WB -> EX | WB -> ID write-through |
+| Store | writes no register | - | - | - | - |
+| HALT / NOP / unassigned | no `reg_write` | - | - | - | - |
+
+Consumer operands and the same forwarding mux:
+
+| Consumer class | Operand | Uses mux |
+|---|---|---|
+| R-type ALU | rs1, rs2 | `a_ex`, `b_ex` |
+| I-type ALU | rs1 | `a_ex` (b is the immediate) |
+| Load | rs1 (base) | `a_ex` |
+| Store | rs1 (address), rs2 (store data, bits [23:20]) | `a_ex`, `b_ex` |
+| Branch | rs1, rs2 | `a_ex`, `b_ex` into the comparator |
+| JALR | rs1 (base) | `a_ex` into the target adder |
+| JAL | none | - |
+
+### 6.2 Priority, R0, valid bits
+
+* **Youngest producer wins.**  EX/MEM is younger than MEM/WB, so the EX/MEM
+  match is tested first.  The double-producer case (same `rd` in both stages)
+  therefore forwards the EX/MEM value.  A directed test
+  (`j_double_producer`) sets `r1=5`, then `r1=6`, then computes `r2=r1+r1` and
+  checks `r2=12`, not 10.
+* **R0 is never forwarded and never written.**  A source of R0 reads the
+  hardwired zero; the forwarding unit tests `reg /= "0000"` before matching and
+  the register file suppresses R0 writes.  `j_r0_producer` and
+  `j_load_r0_forward` check this.
+* **Valid bits.**  A producer is eligible only when its stage valid bit is 1
+  (`reg_write` alone is not enough).  A bubble or a flushed instruction has
+  valid=0 and cannot forward.  This is what makes a taken branch/JAL/JALR/HALT
+  in EX safe: the flushed younger instruction never supplies an operand.
+* **No load forward from EX/MEM.**  The load data does not exist until the end
+  of MEM.  The hazard unit guarantees that a consumer of a load at distance 1 is
+  not in EX while the load is in EX/MEM; it is stalled in ID for one cycle and
+  then receives the MEM/WB value.
+
+### 6.3 Load-use stall rule (forwarding configuration)
+
+Let the instruction in EX be a valid load with `rd /= 0`, and let the valid
+instruction in ID read `rd` in any architectural source position:
+
+| ID consumer | Sources checked |
+|---|---|
+| R-type ALU | rs1, rs2 |
+| I-type ALU / load / JALR | rs1 |
+| SB / SW | rs1 (address) **and** rs2 (store data) |
+| Branch | rs1, rs2 |
+| JAL | none |
+| HALT / NOP / unassigned | none |
+
+Then stall for **exactly one cycle**: PC holds, IF/ID holds, ID/EX receives a
+bubble, EX/MEM and MEM/WB advance.  At distance 2 the load is in WB and is
+forwarded through MEM/WB, so no stall.  At distance 3 the value is read through
+the WB->ID write-through, so no stall.  Store **data** is explicitly included:
+`j_load_store_addr_d1`, `b_load_use_store_data`, `j_load_branch_d1`,
+`j_load_jalr_d1` and `j_pointer_chain` each show one stall.
+
+### 6.4 WB -> ID write-through
+
+The register file has two combinational read ports and one write port.  When
+the instruction in WB writes the same register that ID reads in the same cycle,
+the read mux returns `wb_value` instead of the old array value.  R0 always reads
+zero.  This covers distance 3.  The write itself still happens at the rising
+edge ending WB.
+
+### 6.5 Stall and flush together
+
+**Flush wins.**  `redirect = ex_branch_taken or ex_is_jal or ex_is_jalr` and
+`halt_ex = ex_valid and ex_is_halt`.  The hazard unit gates the stall with
+`redirect = 0 and halt_ex = 0`.  The core's ID/EX update is
+`bubble if redirect or halt_ex or stall`; PC takes the redirect target (or is
+frozen on HALT) before the stall branch.
+
+Proof for the critical case (taken branch/JAL/JALR in EX while ID holds a
+dependent or stalled instruction): let the redirecting instruction be in EX in
+cycle `t`.  The instruction in ID at `t` is younger and is in the shadow; the
+contract says it must not commit and must not hold the machine.  Since
+`redirect=1`, the hazard unit forces `stall=0`; PC <- target at the end of `t`;
+IF/ID valid <- 0 and ID/EX valid <- 0.  The next fetch is the target at `t+1`.
+HALT in EX has the same effect except PC is frozen rather than redirected.
+A HALT in the shadow of a taken branch/JAL is therefore squashed; directed
+tests `c_branch_shadow_halt`, `c_jal_shadow` and the generator's HALT-in-shadow
+template assert this.
+
+### 6.6 Instruction memory under stall and flush
+
+The imem output register is the IF/ID instruction register.  On a **stall** the
+imem address is switched from the fetch pointer `pc` to `if_id_pc`, so the
+output register re-reads and holds the ID instruction while PC is frozen.  On a
+**flush** the imem address is the new PC (or the frozen PC after HALT); the
+first one or two output words are stale, but IF/ID valid is forced to 0 during
+the flush and they never enter ID/EX.  This is the F18 fix from Phase 5A and is
+unchanged in 5B.
+
+### 6.7 Memory address and data timing
+
+The effective address is computed in EX (`a_ex + imm`) and carried in EX/MEM.
+It is presented to dmem/MMIO during MEM.  Store data is forwarded in EX, carried
+in EX/MEM, and written at the end of MEM.  A load's data is captured at the end
+of MEM (RAM bank output register or MMIO capture register) and is available in
+WB and for forwarding in the next cycle.  No load and store can be in MEM in the
+same cycle, so read-during-write is never architecturally visible.
+
+## 7. Cycle-by-cycle tables for the contract examples
+
+Notation: cycle 1 is the first fetch after reset.  Retire is the WB cycle.
+`-` = squashed / not in the pipeline.
+
+### 7.1 Contract A: straight line, 4 instructions
+
+| instr | IF | ID | EX | MEM | WB |
+|---|---|---|---|---|---|
+| 0 addi | 1 | 2 | 3 | 4 | 5 |
+| 1 addi | 2 | 3 | 4 | 5 | 6 |
+| 2 add | 3 | 4 | 5 | 6 | 7 |
+| 3 halt | 4 | 5 | 6 | 7 | 8 |
+
+8 cycles, 4 instructions.
+
+### 7.2 Contract B: load-use at distance 1
+
+| instr | IF | ID | EX | MEM | WB |
+|---|---|---|---|---|---|
+| 0 lw | 1 | 2 | 3 | 4 | 5 |
+| 1 add (stall) | 2 | 3*, 4 | 5 | 6 | 7 |
+| 2 add | 4 | 5 | 6 | 7 | 8 |
+| 3 halt | 5 | 6 | 7 | 8 | 9 |
+
+9 cycles, 1 stall.  The forward is MEM/WB -> EX in cycle 5.
+
+### 7.3 Contract C: taken branch
+
+| instr | IF | ID | EX | MEM | WB |
+|---|---|---|---|---|---|
+| 0 beq (taken) | 1 | 2 | 3 | 4 | 5 |
+| 1 shadow | 2 | 3 | - | - | - |
+| 2 shadow | 3 | - | - | - | - |
+| 3 halt | 4 | 5 | 6 | 7 | 8 |
+
+8 cycles, 2 retired.
+
+### 7.4 Contract D: not-taken branch
+
+| instr | IF | ID | EX | MEM | WB |
+|---|---|---|---|---|---|
+| 0 beq | 1 | 2 | 3 | 4 | 5 |
+| 1 halt | 2 | 3 | 4 | 5 | 6 |
+
+6 cycles.
+
+### 7.5 Contract E/F: JAL / JALR
+
+| instr | IF | ID | EX | MEM | WB |
+|---|---|---|---|---|---|
+| 0 jal/jalr | 1 | 2 | 3 | 4 | 5 |
+| 1 shadow | 2 | 3 | - | - | - |
+| 2 target halt | 4 | 5 | 6 | 7 | 8 |
+
+8 cycles; the link value (PC+1) is written by forwarding through EX/MEM or
+MEM/WB when the next instruction consumes it (`j_jal_link_next`: 3 retired,
+9 cycles).
+
+### 7.6 Contract G: loop with two taken branches
+
+Same table as the contract: dynamic instructions 0,1,2,1,2,1,2,3 retire at
+5,6,7,10,11,14,15,16; **16 cycles**, 8 retired.
+
+## 8. Cycle tables for the Step 3 scenarios
+
+All tables are for the forwarding configuration and are the expectations in
+`tests/directed/j_*.asm` / `.expected`.
+
+### 8.1 ALU -> ALU at distances 1, 2, 3
+
+| distance | producer | consumer | mechanism | example cycles |
+|---|---|---|---|---|
+| 1 | EX/MEM | EX | EX/MEM -> EX | `j_alu_alu_d1`: 3 instr, 7 cycles |
+| 2 | MEM/WB | EX | MEM/WB -> EX | `j_alu_alu_d2`: 4 instr, 8 cycles |
+| 3 | WB | ID | WB -> ID write-through | `j_alu_alu_d3`: 5 instr, 9 cycles |
+
+No stall in any case.
+
+### 8.2 Load -> ALU at distances 1, 2, 3
+
+| distance | producer | consumer | mechanism | example |
+|---|---|---|---|---|
+| 1 | EX/MEM | EX | 1 stall, then MEM/WB -> EX | `j_load_alu_d1`: 6 instr, 11 cycles, 1 stall |
+| 2 | MEM/WB | EX | MEM/WB -> EX | `j_load_alu_d2`: 7 instr, 11 cycles |
+| 3 | WB | ID | WB -> ID write-through | `j_load_alu_d3`: 8 instr, 12 cycles |
+
+### 8.3 Load -> store data / store address / branch / JALR
+
+| consumer | example | stalls | cycles |
+|---|---|---|---|
+| store data | `b_load_use_store_data` | 1 | 12 |
+| store address | `j_load_store_addr_d1` | 1 | 13 |
+| branch operand | `j_load_branch_d1` | 1 | 14 (taken) |
+| JALR base | `j_load_jalr_d1` | 1 | 14 |
+| pointer chase (load->load base) | `j_pointer_chain` | 1 | 13 |
+
+### 8.4 Double producer (EX/MEM vs MEM/WB priority)
+
+`j_double_producer`: `li r1,5; addi r1,r1,1; add r2,r1,r1` -> when the add is in
+EX, EX/MEM holds 6 and MEM/WB holds 5.  EX/MEM wins, `r2=12`.  Cycle 1..8, no
+stall.
+
+### 8.5 JAL link consumed by the next instruction
+
+`j_jal_link_next`: `jal r15,.+1` redirects to PC+1 (the next instruction), which
+is squashed and re-fetched.  When it is in EX, the JAL is in MEM (EX/MEM) and
+the link 1 is forwarded.  `r1 = 1+1 = 2`; 3 retired, 9 cycles.
+
+### 8.6 Store -> load at distances 1..4, byte/word combinations
+
+Stores commit at the end of MEM; a younger load's MEM is always later.  No
+bypass or stall is needed.
+
+| distance | SB then LB/LBU | SW then LB | SB then LW | SW then LW |
+|---|---|---|---|---|
+| 1 | `j_sb_lw_d1` | `a_sw_lb` | `a_sb_lw` | `a_store_load_d1` |
+| 2 | generator | `a_misaligned` variant | - | `a_store_load_d2` |
+| 3 | generator | - | - | `a_store_load_d3` |
+| 4 | generator | - | - | `j_store_load_d4` |
+
+`j_sw_lb_d1` checks both byte lanes after an SW: `lb 0` = 0xFFCD, `lb 1` =
+0xFFAB, `lbu 0` = 0x00CD.
+
+### 8.7 HALT with a load in flight
+
+`j_halt_load_in_flight`: `lw r3,0(r1); halt`.  HALT reaches EX while the load is
+in MEM; the load completes and retires, HALT retires at cycle 9, and fetch is
+frozen.  5 retired, 9 cycles.
+
+### 8.8 Pointer-chasing load chain
+
+`j_pointer_chain`: load `r3 = 0x0102, then `lw r4,0(r3)`.  The second load is at
+distance 1 and stalls one cycle; `r4 = 0x55`, 8 retired, 13 cycles.
+
+## 9. Predicted critical paths (checked in Step 8)
+
+1. **Forwarding mux -> ALU -> branch/target adder -> PC**: the EX/MEM result
+   mux feeds the ALU and the JALR/branch adder, then the PC.  This should be the
+   longest combinational path in the forwarding configuration.
+2. **dmem bank output register -> WB mux -> register-file write data** (and the
+   parallel MEM/WB forwarding mux): a shorter RAM-to-register path.
+3. **Hazard/forwarding compare (4-bit equality) -> operand mux select**: short,
+   but shared by both operands.
+4. **imem address mux (stall) -> BRAM address**: the stall mux adds one LUT
+   level before the instruction BRAM.
+5. **MMIO read mux (UART_STATUS/GPIO_IN/TIMER) -> MEM/WB capture**: a wide mux
+   but registered at the end of MEM.
+
+The Step 8 nextpnr reports are compared against these predictions.

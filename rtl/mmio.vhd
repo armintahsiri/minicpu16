@@ -53,7 +53,7 @@ architecture rtl of mmio is
   signal uart_remaining : integer range 0 to UART_CYCLES_PER_BYTE := 0;
   signal uart_byte_r    : std_logic_vector(7 downto 0) := (others => '0');
   signal uart_valid_r   : std_logic := '0';
-  signal uart_busy_r    : std_logic := '0';
+  signal uart_busy_s    : std_logic := '0';
   signal uart_drop_r    : std_logic := '0';
 
   signal reads_r  : unsigned(31 downto 0) := (others => '0');
@@ -75,7 +75,7 @@ begin
       when UART_TX_ADDR =>
         w := (others => '0');
       when UART_STATUS_ADDR =>
-        w := (0 => uart_busy_r, others => '0');
+        w := (0 => uart_busy_s, others => '0');
       when GPIO_OUT_ADDR =>
         w := gpio_out_reg;
       when GPIO_IN_ADDR =>
@@ -98,7 +98,11 @@ begin
     end if;
   end process;
 
-  uart_busy <= uart_busy_r;
+  -- Busy is combinational: exactly N observable cycles c+1..c+N after an
+  -- accepting write in MEM cycle c.  A registered flag would be observable for
+  -- N+1 cycles and would disagree with the write-acceptance test (F25).
+  uart_busy_s <= '1' when uart_remaining > 0 else '0';
+  uart_busy <= uart_busy_s;
   gpio_out  <= gpio_out_reg;
   uart_tx_byte  <= uart_byte_r;
   uart_tx_valid <= uart_valid_r;
@@ -118,7 +122,6 @@ begin
         uart_remaining <= 0;
         uart_byte_r    <= (others => '0');
         uart_valid_r   <= '0';
-        uart_busy_r    <= '0';
         uart_drop_r    <= '0';
         reads_r  <= (others => '0');
         writes_r <= (others => '0');
@@ -132,11 +135,6 @@ begin
         uart_drop_r  <= '0';
         if uart_remaining > 0 then
           uart_remaining <= uart_remaining - 1;
-        end if;
-        if uart_remaining > 0 then
-          uart_busy_r <= '1';
-        else
-          uart_busy_r <= '0';
         end if;
 
         if load_en = '1' and addr(15 downto 8) = x"FF" then
@@ -152,9 +150,6 @@ begin
                 uart_byte_r  <= wdata(7 downto 0);
                 uart_valid_r <= '1';
                 uart_remaining <= UART_CYCLES_PER_BYTE;
-                if UART_CYCLES_PER_BYTE > 0 then
-                  uart_busy_r <= '1';
-                end if;
               else
                 uart_drop_r <= '1';
                 drops_r <= drops_r + 1;

@@ -1,9 +1,14 @@
--- MiniCPU-16 Phase 5A CPU testbench.
+-- MiniCPU-16 Phase 5B CPU testbench.
 --
 -- Program/data hex images are loaded at elaboration by impure textio functions
 -- and passed to the core as generics.  The testbench writes the exact v1
--- retirement trace (docs/TRACE_FORMAT.md), a final-state file, a coverage file
--- and enforces both a cycle budget and a wall-clock watchdog.
+-- retirement trace (docs/TRACE_FORMAT.md), a final-state file, a per-cycle
+-- pipeview file (verification only) and enforces both a cycle budget and a
+-- wall-clock watchdog.
+--
+-- GPIO_IN is driven from a deterministic "cycle value" schedule file
+-- (docs/MICROARCH_CONTRACT.md section 7.3).  If GPIO_SCHEDULE is empty the
+-- constant GPIO_IN_VALUE is used.
 --
 -- Cycle numbering: reset is released between edges; the first post-reset cycle
 -- is cycle 1.  The testbench samples the WB retirement interface at the falling
@@ -25,12 +30,14 @@ entity tb_cpu is
     DATA_HEX             : string  := "build/prog.data.hex";
     TRACE_OUT            : string  := "build/rtl.trace";
     STATE_OUT            : string  := "build/rtl.state";
+    PIPE_OUT             : string  := "build/rtl.pipe";
     MAX_CYCLES           : integer := 200000;
-    FORWARDING           : boolean := false;
+    FORWARDING           : boolean := true;
     UART_CYCLES_PER_BYTE : integer := 10;
     INSTR_WORDS          : integer := 2048;
     RAM_BYTES            : integer := 4096;
     GPIO_IN_VALUE        : integer := 0;
+    GPIO_SCHEDULE        : string  := "";
     COUNTING             : boolean := true;
     WATCHDOG_SECONDS     : integer := 30;
     DRAIN_CYCLES         : integer := 2
@@ -96,6 +103,115 @@ architecture sim of tb_cpu is
   constant INSTR_IMAGE : instr_image_t(0 to INSTR_WORDS - 1) := load_instr(PROGRAM_HEX);
   constant DATA_IMAGE  : byte_image_t(0 to RAM_BYTES - 1) := load_data(DATA_HEX);
 
+  -- ---------------------------------------------------------------- schedule
+  type sched_entry_t is record
+    cyc : integer;
+    val : std_logic_vector(15 downto 0);
+  end record;
+  type sched_t is array (natural range <>) of sched_entry_t;
+
+  procedure parse_dec (txt : string; p : inout integer; tl : integer;
+                       val : out integer; ok : out boolean) is
+    variable v : integer := 0;
+    variable started : boolean := false;
+  begin
+    while p <= tl and (txt(p) = ' ' or txt(p) = character'val(9)) loop
+      p := p + 1;
+    end loop;
+    while p <= tl and txt(p) >= '0' and txt(p) <= '9' loop
+      v := v * 10 + (character'pos(txt(p)) - character'pos('0'));
+      p := p + 1;
+      started := true;
+    end loop;
+    val := v;
+    ok := started;
+  end procedure;
+
+  impure function load_schedule (path : string; constval : integer) return sched_t is
+    file f : text;
+    variable st : file_open_status;
+    variable raw : line;
+    variable txt : string(1 to 256);
+    variable tl, p : integer;
+    variable c, v : integer;
+    variable ok1, ok2 : boolean;
+    variable tmp : sched_t(0 to 1023);
+    variable n : integer := 0;
+  begin
+    if path'length = 0 then
+      tmp(0) := (cyc => 1,
+                 val => std_logic_vector(to_unsigned(constval mod 65536, 16)));
+      return tmp(0 to 0);
+    end if;
+    file_open(st, f, path, read_mode);
+    if st /= open_ok then
+      report "tb_cpu: cannot open GPIO schedule " & path severity failure;
+    end if;
+    while not endfile(f) loop
+      readline(f, raw);
+      tl := raw.all'length;
+      if tl > 256 then
+        report "tb_cpu: GPIO schedule line too long" severity failure;
+      end if;
+      for i in 1 to tl loop
+        txt(i) := raw.all(raw.all'low + i - 1);
+      end loop;
+      p := 1;
+      while p <= tl and (txt(p) = ' ' or txt(p) = character'val(9)) loop
+        p := p + 1;
+      end loop;
+      if p <= tl and txt(p) /= '#' then
+        parse_dec(txt, p, tl, c, ok1);
+        parse_dec(txt, p, tl, v, ok2);
+        if not ok1 or not ok2 then
+          report "tb_cpu: bad GPIO schedule line (expected '<cycle> <value>')"
+            severity failure;
+        end if;
+        if c < 1 or v < 0 or v > 65535 then
+          report "tb_cpu: GPIO schedule range error" severity failure;
+        end if;
+        if n >= 1024 then
+          report "tb_cpu: too many GPIO schedule entries" severity failure;
+        end if;
+        tmp(n) := (cyc => c, val => std_logic_vector(to_unsigned(v, 16)));
+        n := n + 1;
+      end if;
+    end loop;
+    file_close(f);
+    if n = 0 then
+      report "tb_cpu: empty GPIO schedule" severity failure;
+    end if;
+    for i in 1 to n - 1 loop
+      if tmp(i).cyc <= tmp(i - 1).cyc then
+        report "tb_cpu: GPIO schedule must be strictly increasing" severity failure;
+      end if;
+    end loop;
+    return tmp(0 to n - 1);
+  end function;
+
+  constant GPIO_SCHED    : sched_t := load_schedule(GPIO_SCHEDULE, GPIO_IN_VALUE);
+  constant HAS_SCHEDULE  : boolean := GPIO_SCHEDULE'length > 0;
+
+  function sched_at (t : integer) return std_logic_vector is
+    variable v : std_logic_vector(15 downto 0) := (others => '0');
+  begin
+    if t <= 0 then
+      if HAS_SCHEDULE then
+        return x"0000";
+      else
+        return GPIO_SCHED(0).val;
+      end if;
+    end if;
+    for i in GPIO_SCHED'range loop
+      if GPIO_SCHED(i).cyc <= t then
+        v := GPIO_SCHED(i).val;
+      else
+        exit;
+      end if;
+    end loop;
+    return v;
+  end function;
+
   function hex4 (v : std_logic_vector(15 downto 0)) return string is
     variable s : string(1 to 4);
     variable n : integer;
@@ -136,7 +252,7 @@ architecture sim of tb_cpu is
       return "0";
     end if;
     if x < 0 then
-      return integer'image(x);      -- negative values are not used in the trace
+      return integer'image(x);
     end if;
     while x > 0 loop
       t(i) := character'val(character'pos('0') + (x mod 10));
@@ -170,6 +286,17 @@ architecture sim of tb_cpu is
   signal retire_halt      : std_logic;
   signal cov              : cov_t;
 
+  signal pipe_id_valid  : std_logic;
+  signal pipe_id_pc     : std_logic_vector(15 downto 0);
+  signal pipe_ex_valid  : std_logic;
+  signal pipe_ex_pc     : std_logic_vector(15 downto 0);
+  signal pipe_mem_valid : std_logic;
+  signal pipe_mem_pc    : std_logic_vector(15 downto 0);
+  signal pipe_wb_valid  : std_logic;
+  signal pipe_wb_pc     : std_logic_vector(15 downto 0);
+  signal pipe_stall     : std_logic;
+  signal pipe_flush     : std_logic;
+
   signal done : std_logic := '0';
 
   procedure puts (variable l : inout line; constant s : string) is
@@ -183,7 +310,6 @@ architecture sim of tb_cpu is
 begin
 
   clk <= not clk after 5 ns;
-  gpio_in_s <= std_logic_vector(to_unsigned(GPIO_IN_VALUE mod 65536, 16));
 
   dut : entity work.minicpu16_core
     generic map (
@@ -205,7 +331,13 @@ begin
       retire_mem_kind => retire_mem_kind, retire_mem_addr => retire_mem_addr,
       retire_mem_size => retire_mem_size, retire_mem_data => retire_mem_data,
       retire_taken => retire_taken, retire_target => retire_target,
-      retire_halt => retire_halt, cov => cov);
+      retire_halt => retire_halt,
+      pipe_id_valid => pipe_id_valid, pipe_id_pc => pipe_id_pc,
+      pipe_ex_valid => pipe_ex_valid, pipe_ex_pc => pipe_ex_pc,
+      pipe_mem_valid => pipe_mem_valid, pipe_mem_pc => pipe_mem_pc,
+      pipe_wb_valid => pipe_wb_valid, pipe_wb_pc => pipe_wb_pc,
+      pipe_stall => pipe_stall, pipe_flush => pipe_flush,
+      cov => cov);
 
   -- Wall-clock watchdog: a hung CPU must never hang the build.
   watchdog : process
@@ -220,8 +352,10 @@ begin
   main : process
     file trace_f : text;
     file state_f : text;
+    file pipe_f  : text;
     variable tstatus : file_open_status;
     variable sstatus : file_open_status;
+    variable pstatus : file_open_status;
     variable ln : line;
     variable cycle : integer := 0;
     variable seq   : integer := 0;
@@ -238,6 +372,47 @@ begin
     variable hx : line;
     variable size_i : integer;
     variable rd_i : integer;
+
+    procedure pipe_line (c : integer) is
+    begin
+      puts(ln, dec(c)); puts(ln, " ");
+      if pipe_id_valid = '1' then
+        puts(ln, "1 ");
+      else
+        puts(ln, "0 ");
+      end if;
+      puts(ln, hex4(pipe_id_pc)); puts(ln, " ");
+      if pipe_ex_valid = '1' then
+        puts(ln, "1 ");
+      else
+        puts(ln, "0 ");
+      end if;
+      puts(ln, hex4(pipe_ex_pc)); puts(ln, " ");
+      if pipe_mem_valid = '1' then
+        puts(ln, "1 ");
+      else
+        puts(ln, "0 ");
+      end if;
+      puts(ln, hex4(pipe_mem_pc)); puts(ln, " ");
+      if pipe_wb_valid = '1' then
+        puts(ln, "1 ");
+      else
+        puts(ln, "0 ");
+      end if;
+      puts(ln, hex4(pipe_wb_pc)); puts(ln, " ");
+      if pipe_stall = '1' then
+        puts(ln, "1 ");
+      else
+        puts(ln, "0 ");
+      end if;
+      if pipe_flush = '1' then
+        puts(ln, "1");
+      else
+        puts(ln, "0");
+      end if;
+      writeline(pipe_f, ln);
+    end procedure;
+
   begin
     file_open(tstatus, trace_f, TRACE_OUT, write_mode);
     if tstatus /= open_ok then
@@ -247,11 +422,19 @@ begin
     if sstatus /= open_ok then
       report "tb_cpu: cannot open state file " & STATE_OUT severity failure;
     end if;
+    file_open(pstatus, pipe_f, PIPE_OUT, write_mode);
+    if pstatus /= open_ok then
+      report "tb_cpu: cannot open pipeview file " & PIPE_OUT severity failure;
+    end if;
 
     puts(ln, "# minicpu16-retirement-trace v1");
     writeline(trace_f, ln);
     puts(ln, "# seq retire pc instr rd value memop memaddr memsize memdata taken target");
     writeline(trace_f, ln);
+    puts(ln, "# minicpu16-pipeview v1");
+    writeline(pipe_f, ln);
+    puts(ln, "# cycle id_v id_pc ex_v ex_pc mem_v mem_pc wb_v wb_pc stall flush");
+    writeline(pipe_f, ln);
 
     rst <= '1';
     wait until rising_edge(clk);
@@ -260,11 +443,22 @@ begin
     wait until falling_edge(clk);
     rst <= '0';
     cycle := 1;
-    wait until rising_edge(clk);   -- end of cycle 1
+
+    -- Cycle 1: the pipeline is still empty (reset values), so no instruction
+    -- can retire.  Record it explicitly, then continue from cycle 2.
+    gpio_in_s <= sched_at(1);
+    pipe_line(1);
+    wait until rising_edge(clk);
     cycle := 2;
 
     loop
       wait until falling_edge(clk);
+
+      -- Drive the external GPIO input for this architectural cycle.
+      gpio_in_s <= sched_at(cycle);
+
+      -- Pipeview record for this cycle (verification only).
+      pipe_line(cycle);
 
       -- One-cycle UART output pulse; sample once.
       if uart_tx_valid = '1' then
@@ -277,7 +471,6 @@ begin
       if retire_valid = '1' then
         seq := seq + 1;
 
-        -- Retirement record.
         puts(ln, dec(seq)); puts(ln, " ");
         puts(ln, dec(cycle)); puts(ln, " ");
         puts(ln, hex4(retire_pc)); puts(ln, " ");
@@ -330,7 +523,6 @@ begin
         end if;
         writeline(trace_f, ln);
 
-        -- Architectural shadow for the final state.
         if retire_mem_kind = "10" then
           addr_i := to_integer(unsigned(retire_mem_addr));
           if retire_mem_size = "01" then
@@ -365,9 +557,7 @@ begin
     end loop;
 
     -- HALT must stop the machine.  Continue for a few cycles: no younger
-    -- instruction may retire, and the frozen fetch PC must not move.  This is
-    -- what catches a HALT implementation that stops fetch but lets an already
-    -- fetched younger instruction drain through EX/MEM/WB.
+    -- instruction may retire, and the frozen fetch PC must not move.
     halt_fetch_pc := to_integer(unsigned(pc_out));
     for i in 1 to DRAIN_CYCLES loop
       wait until rising_edge(clk);
@@ -380,7 +570,6 @@ begin
       end if;
     end loop;
 
-    -- Final state file: simple key/value lines, one item per line.
     puts(hx, "halted " & dec(1)); writeline(state_f, hx);
     puts(hx, "cycles " & dec(total_cycles)); writeline(state_f, hx);
     puts(hx, "instructions " & dec(seq)); writeline(state_f, hx);
@@ -412,6 +601,7 @@ begin
 
     file_close(trace_f);
     file_close(state_f);
+    file_close(pipe_f);
     done <= '1';
     report "tb_cpu: PASS cycles=" & dec(total_cycles) & " instructions=" & dec(seq) severity note;
     finish;

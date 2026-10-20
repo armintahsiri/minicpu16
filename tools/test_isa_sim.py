@@ -420,6 +420,126 @@ halt
         with self.assertRaises(WatchdogError):
             self.run_p("j 0\n", max_instructions=20)
 
+
+    # ---------------------------------------------- peripheral timing (5B)
+    def test_timer_mem_cycle_hand_table(self):
+        # Cycle 1 = first fetch after reset.  li MEM4, lw MEM5 -> 5,
+        # lw MEM7 -> 7, HALT WB9.  The TIMER value is the MEM cycle number.
+        r = self.run_p("""
+li t0, TIMER
+lw t1, 0(t0)
+nop
+lw t2, 0(t0)
+halt
+""")
+        self.eq(r.regs[6], 5)
+        self.eq(r.regs[7], 7)
+        self.eq(r.cycles, 9)
+        self.eq([t.retire_cycle for t in r.trace], [5, 6, 7, 8, 9])
+
+    def test_uart_busy_window_hand_table(self):
+        # write MEM7 (c=7); status reads MEM8 (c+1), MEM9 (c+2), MEM11 (c+4).
+        # Busy for N cycles c+1..c+N, so the expected values are hand-written.
+        src = """
+li t0, UART_TX
+li s0, UART_STATUS
+li t1, 0x41
+sw t1, 0(t0)
+lw t2, 0(s0)
+lw t3, 0(s0)
+nop
+lw a0, 0(s0)
+halt
+"""
+        expect = {
+            1: (1, 0, 0),
+            2: (1, 1, 0),
+            10: (1, 1, 1),
+            104: (1, 1, 1),
+        }
+        for n, (v1, v2, v4) in expect.items():
+            r = self.run_p(src, uart_cycles_per_byte=n)
+            self.eq(r.regs[7], v1, "N=%d c+1" % n)
+            self.eq(r.regs[8], v2, "N=%d c+2" % n)
+            self.eq(r.regs[1], v4, "N=%d c+4" % n)
+            self.eq(r.cycles, 13, "N=%d cycles" % n)
+
+    def test_uart_accept_boundary_hand_table(self):
+        # First write MEM6 (c=6), nop MEM7, second write MEM8 (c+2).
+        src = """
+li t0, UART_TX
+li t1, 0x41
+sw t1, 0(t0)
+nop
+sw t1, 0(t0)
+halt
+"""
+        # N=1: busy c+1..c+1; the second write at c+2 is accepted.
+        r = self.run_p(src, uart_cycles_per_byte=1)
+        self.eq(r.uart, [0x41, 0x41], "N=1 c+2 accepted")
+        # N=2: busy c+1..c+2; the second write at c+2 is dropped.
+        r = self.run_p(src, uart_cycles_per_byte=2)
+        self.eq(r.uart, [0x41], "N=2 c+2 dropped")
+        # N=0 is the documented degenerate no-busy setting.
+        r = self.run_p(src, uart_cycles_per_byte=0)
+        self.eq(r.uart, [0x41, 0x41], "N=0 no busy window")
+
+    def test_uart_back_to_back_drop(self):
+        # Both stores in consecutive MEM cycles: d = c+1, always busy for N>=1.
+        src = """
+li t0, UART_TX
+li t1, 0x41
+sw t1, 0(t0)
+sw t1, 0(t0)
+halt
+"""
+        for n in (1, 2, 10, 104):
+            r = self.run_p(src, uart_cycles_per_byte=n)
+            self.eq(r.uart, [0x41], "N=%d back-to-back drop" % n)
+
+    def test_gpio_in_schedule_latency(self):
+        # L=2: a read in MEM at cycle c observes the external value at c-2.
+        # Reads are at MEM5, MEM7 and MEM10.
+        r = self.run_p("""
+li t0, GPIO_IN
+lw t1, 0(t0)
+nop
+lw t2, 0(t0)
+nop
+nop
+lw t3, 0(t0)
+halt
+""", gpio_in=[(1, 0x1111), (3, 0x2222), (6, 0x3333)])
+        self.eq(r.regs[6], 0x2222)   # ext(3)
+        self.eq(r.regs[7], 0x2222)   # ext(5)
+        self.eq(r.regs[8], 0x3333)   # ext(8)
+        self.eq(r.cycles, 12)
+
+    def test_gpio_in_schedule_before_first_entry(self):
+        # Before the first schedule entry the external value is 0.
+        # Read at MEM5 -> ext(3) = 0; read at MEM7 -> ext(5) = 0xABCD.
+        r = self.run_p("""
+li t0, GPIO_IN
+lw t1, 0(t0)
+nop
+lw t2, 0(t0)
+halt
+""", gpio_in=[(5, 0xABCD)])
+        self.eq(r.regs[6], 0)
+        self.eq(r.regs[7], 0xABCD)
+
+    def test_gpio_schedule_loader(self):
+        import tempfile
+        from isa_sim import load_gpio_schedule
+        with tempfile.NamedTemporaryFile("w", suffix=".gpio", delete=False) as f:
+            f.write("# comment\n\n1 0x1111\n3 4660\n")
+            path = f.name
+        try:
+            self.eq(load_gpio_schedule(path), [(1, 0x1111), (3, 4660)])
+        finally:
+            import os
+            os.unlink(path)
+
     # --------------------------------------------------------------- traces
     def test_trace_memory_fields(self):
         r = self.run_p("""

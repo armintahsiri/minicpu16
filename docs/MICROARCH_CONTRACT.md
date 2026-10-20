@@ -287,3 +287,166 @@ branch penalties the same 8 instructions would take 12 cycles.
 
 These numbers are asserted by `tools/test_isa_sim.py`; the Phase 5 RTL must
 reproduce them exactly.
+
+
+---
+
+## 7. Peripheral timing (normative; added in Phase 5B)
+
+This section resolves the Phase 5A findings F1-F3.  **The timing layer is
+authoritative** for any program that reads `TIMER`, `UART_STATUS` or `GPIO_IN`.
+The architectural layer (`run_arch`) reads the same registers but is not a
+cycle-accurate statement about them; only `run_pipeline` and the RTL implement
+this section.
+
+Cycle numbering is the one in section 6: cycle 1 is the first cycle after reset
+release; an instruction fetched in cycle `f` is in MEM at `f+3` and WB at `f+4`.
+All peripheral reads below happen in **MEM** and the captured value is available
+in WB and for forwarding in the next cycle.
+
+### 7.1 TIMER (`0xFF08`)
+
+**Definition.** A read of TIMER in MEM at cycle `c` returns `c mod 2^16`.  The
+counter is 1 in cycle 1, 2 in cycle 2, ..., 65535 in cycle 65535, 0 in cycle
+65536, and so on.  A 16-bit read and a byte read both return the corresponding
+part of that 16-bit value (`LB` sign-extends, `LBU` zero-extends, per the ISA).
+
+**Wrap.** The counter is modulo 2^16.  A read in a run longer than 65535 cycles
+therefore sees the wrapped value; the run's cycle number in the trace is not
+wrapped.
+
+**Mid-run reset.** Reset clears the counter to 0.  After release the next cycle is
+cycle 1 again and the counter reads 1.  Reset does not preserve the old count.
+No read can occur during reset because the pipeline is cleared.
+
+**Hand derivation.** A straight-line program has MEM cycle = `index + 4` for a
+program starting at instruction 0 (instruction 0: IF1, MEM4).  For
+
+```
+0: li t0, TIMER
+1: lw t1, 0(t0)
+2: nop
+3: lw t2, 0(t0)
+4: halt
+```
+
+| instr | IF | ID | EX | MEM | WB | TIMER value read |
+|---|---|---|---|---|---|---|
+| 0 `li` | 1 | 2 | 3 | 4 | 5 | - |
+| 1 `lw` | 2 | 3 | 4 | 5 | 6 | **5** |
+| 2 `nop` | 3 | 4 | 5 | 6 | 7 | - |
+| 3 `lw` | 4 | 5 | 6 | 7 | 8 | **7** |
+| 4 `halt` | 5 | 6 | 7 | 8 | 9 | - |
+
+**Total 9 cycles**, `t1 = 5`, `t2 = 7`.  This is asserted by
+`tools/test_isa_sim.py::test_timer_mem_cycle_hand_table`.
+
+### 7.2 UART (`0xFF00` TX, `0xFF02` STATUS)
+
+Let `N = UART_CYCLES_PER_BYTE`.  `N >= 1` is the legal hardware range.  `N = 0`
+is a documented degenerate setting used only by simulation/fuzz corpus code: the
+transmitter is never busy and no write is ever dropped.  It is **not** a hardware
+configuration and a synthesis build must not rely on it.
+
+A store to `UART_TX` whose MEM cycle is `c` is an **accepting write** iff the
+transmitter is idle in cycle `c` (equivalently, iff no earlier accepting write has
+its busy window covering `c`).  An accepting write:
+
+* appends the byte to the output stream;
+* makes the transmitter busy for exactly `N` observable cycles: **first busy
+  cycle `c+1`, last busy cycle `c+N`, first idle cycle `c+N+1`**;
+* the write cycle `c` itself is never observable by a status read, because a
+  status read has its own, different MEM cycle.
+
+A store to `UART_TX` whose MEM cycle is `d` while busy (`c+1 <= d <= c+N`) is
+**dropped**: the byte never appears in the output stream, the store still
+retires and its retirement record is still emitted.  A store at `d = c+N+1` is
+accepted.
+
+**Legal N / hand tables.**  Write at MEM cycle `c = 7`; status reads at MEM
+cycles `8 = c+1`, `9 = c+2`, `11 = c+4`:
+
+| N | c+1 = 8 | c+2 = 9 | c+4 = 11 | busy window (observable) |
+|---|---|---|---|---|
+| 1 (min legal) | 1 | 0 | 0 | 8 |
+| 2 | 1 | 1 | 0 | 8..9 |
+| 10 | 1 | 1 | 1 | 8..17 |
+| 104 | 1 | 1 | 1 | 8..111 |
+
+Acceptance boundary, first write at `c = 6`, second write at MEM cycle `d`:
+
+| N | d = c+1 = 7 | d = c+2 = 8 | d = c+3 = 9 |
+|---|---|---|---|
+| 1 | dropped (7 <= 6+1) | **accepted** (8 = 6+1+1) | accepted |
+| 2 | dropped | dropped (8 <= 8) | **accepted** (9 = 6+2+1) |
+| 10 | dropped | dropped | dropped |
+
+These two tables are asserted by
+`test_uart_busy_window_hand_table`, `test_uart_accept_boundary_hand_table` and
+`test_uart_back_to_back_drop`.
+
+**Mid-run reset.** Reset clears the busy countdown; UART_STATUS reads 0 in the
+first cycle after release, and a write in that cycle is accepted.
+
+### 7.3 GPIO_IN (`0xFF06`)
+
+The external input is asynchronous and passes through a **two-flop
+synchroniser**, so `L = 2`.  Define `ext(t)` as the external 16-bit value that is
+stable during cycle `t`.  Then a read of GPIO_IN in MEM at cycle `c` returns:
+
+```
+GPIO_IN_read(c) = ext(c - L) = ext(c - 2)          for c > 2
+GPIO_IN_read(1) = GPIO_IN_read(2) = 0              (synchroniser reset value)
+```
+
+Equivalently `ext(t) = 0` for `t <= 0`.  A byte read returns the low byte of the
+observed 16-bit value, with the ISA's `LB`/`LBU` extension rule.
+
+**Reset.** Both synchroniser flops are cleared by reset, so the first two cycles
+after release read 0 regardless of the external value.
+
+**Deterministic input schedule (shared by the model and the RTL testbench).**
+
+```
+# comment lines and blank lines are ignored
+<cycle> <value>
+```
+
+`cycle` is a decimal or `0x`-prefixed integer `>= 1`; `value` is a decimal or
+`0x`-prefixed integer in `0..0xFFFF`.  Entries are sorted by cycle.  The external
+value during cycle `t` is the value of the **last entry with entry_cycle <= t**;
+before the first entry it is 0; the last entry holds for all later cycles.
+Duplicate cycles are an error.  The loader is
+`tools/isa_sim.py::load_gpio_schedule`; the RTL testbench reads the same file
+through the `GPIO_SCHEDULE` generic.
+
+**Hand derivation.** Schedule `1 -> 0x1111`, `3 -> 0x2222`, `6 -> 0x3333`:
+
+```
+0: li t0, GPIO_IN     MEM 4
+1: lw t1, 0(t0)       MEM 5   reads ext(3) = 0x2222
+2: nop                MEM 6
+3: lw t2, 0(t0)       MEM 7   reads ext(5) = 0x2222
+4: nop                MEM 8
+5: nop                MEM 9
+6: lw t3, 0(t0)       MEM 10  reads ext(8) = 0x3333
+7: halt               MEM 11, WB 12
+```
+
+**Total 12 cycles**, `t1 = 0x2222`, `t2 = 0x2222`, `t3 = 0x3333`.  If the first
+entry were at cycle 5 instead, the MEM-5 read would observe `ext(3) = 0` and the
+MEM-7 read would observe `ext(5) = 0xABCD`.  These are asserted by
+`test_gpio_in_schedule_latency` and
+`test_gpio_in_schedule_before_first_entry`.
+
+### 7.4 Consequences for verification
+
+* `hello`, `05_mmio` and every program that reads a peripheral are now compared
+  **cycle-exactly**; the Phase 5A `cycle_sensitive` exclusions are removed.
+* The RTL implementation of the UART busy flag must be the combinational
+  `remaining > 0`, not a registered flag delayed by one cycle.  The Phase 5A RTL
+  registered flag made busy observable for `N+1` cycles and disagreed with the
+  status read at `c+N+1`; this is an RTL bug (finding F25) fixed in Phase 5B, not
+  a contract change.
+* The architectural layer keeps its documented approximation: it reports the
+  current-cycle peripheral value.  It is never used for cycle-exact comparison.
