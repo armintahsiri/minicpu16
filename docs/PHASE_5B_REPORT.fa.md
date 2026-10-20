@@ -519,7 +519,7 @@ PASS postsynth: 3 programs, the retirement trace and the pipeview match the gold
 
 جمع: **۱۰۷ فایل، +۵۱۴۳ / −۵۵۴ خط** نسبت به `15f300a` (Phase 5A).
 
-### پ) ابزارها و نسخه‌ها (بخش ۲ خواستهٔ T7)
+### پ) ابزارها و نسخه‌ها (بند ۲ خواستهٔ T7)
 
 | ابزار | نسخه | مسیر |
 |---|---|---|

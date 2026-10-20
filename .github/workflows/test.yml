@@ -8,9 +8,9 @@
 # # image are unpinned guesses.  Treat the first run as an experiment.   #
 # #                                                                     #
 # # Nothing in this repository claims that CI is green.  The Phase 5B    #
-# # report says the same in section 11 ("not verified"): every number in #
+# # report says the same in section 13 ("not verified"): every number in #
 # # docs/ is from a LOCAL run, on this machine, with the tool versions  #
-# # listed in section 2 of the report.                                    #
+# # listed in section 13 of the report.                                   #
 # ##########################################################################
 #
 # What CI runs: `make test`, the quick suite only.  That is:
