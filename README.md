@@ -224,7 +224,7 @@ load-use stalls matter only in the load-heavy integer programs.
 
 * consistency: 490 checks, PASS; negative mutation self-test PASS
 * assembler: 20 test methods / 830 hand-computed checks
-* golden model / timing layer: 37 test methods / 22,204 checks
+* golden model / timing layer: 44 test methods / 22,238 checks
 * trace diff: 8 test methods / 17 checks
 * programs: 6 test methods / 290 checks
 * generator: 5 test methods / 80 checks (200 programs, all opcodes, all hazard patterns)

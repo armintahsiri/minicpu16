@@ -198,6 +198,15 @@ COV_KEYS = [
     "stall_near_flush", "fwd_lb_sext", "fwd_link", "fwd_from_bubble",
 ]
 
+# Counters that are architecturally unreachable in the forwarding configuration
+# and must therefore be exactly zero there.  `stall_ex`/`stall_mem` are the
+# Phase 5A conservative stall causes (producer in EX or MEM), which do not exist
+# once forwarding is enabled; `stall_near_flush` and `fwd_from_bubble` cannot
+# occur because a load-use stall and a redirect are mutually exclusive and the
+# forwarding mux is gated by the stage valid bits (docs/RTL_FINDINGS.md F28).
+EXPECTED_ZERO_FWD = {"stall_ex", "stall_mem", "stall_near_flush",
+                     "fwd_from_bubble"}
+
 
 def analyze_trace(path: Path) -> Dict[str, int]:
     c = {k: 0 for k in COV_KEYS}
@@ -426,8 +435,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Phase 5B Step 1c: the full run must exercise every counter and the
     # store->load distance counters from random programs only.
     if ns.n >= 300 and not ns.no_cov_assert:
-        zero = [k for k in COV_KEYS if cov_random[k] == 0]
-        low = [k for k in COV_KEYS if 0 < cov_random[k] < 20]
+        checked = [k for k in COV_KEYS
+                   if not (ns.forwarding and k in EXPECTED_ZERO_FWD)]
+        zero = [k for k in checked if cov_random[k] == 0]
+        low = [k for k in checked if 0 < cov_random[k] < 20]
         stores = {k: cov_random[k] for k in
                   ("store_load_d1", "store_load_d2", "store_load_d3")}
         low_stores = [k for k, v in stores.items() if v < 50]
