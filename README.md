@@ -234,8 +234,11 @@ load-use stalls matter only in the load-heavy integer programs.
   cycle-exact; the quick subset in `make test` is 46 case-runs
 * quick fuzz in `make test`: 52 case-runs (40 NVC + 8 GHDL subset + curated),
   0 failed, cycle-exact
-* forwarding fuzz (<code>make rtl-fuzz</code>): **1000 programs on NVC, 150 on
-  GHDL, 0 mismatches**, cycle-exact, every reachable coverage counter non-zero
+* forwarding fuzz (<code>make rtl-fuzz</code>): **1012 case-runs on NVC, 150 on
+  GHDL, 0 failed**, cycle-exact, every reachable coverage counter non-zero (the
+  four forwarding-unreachable counters are exactly zero, F28)
+* general fuzz (<code>make rtl-fuzz-general</code>): **312 case-runs on NVC, 100
+  on GHDL, 0 failed**, six generator modes, cycle-exact
 * stall-only regression (<code>make fwd-regression</code>): 0 failed, architecture only
 * mutation: **30/30 detected on NVC, 30/30 on GHDL, 27/30 (90%) by the
   fuzz-only corpus** (threshold >= 90%)
