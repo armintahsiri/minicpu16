@@ -528,7 +528,7 @@ PASS postsynth: 3 programs, the retirement trace and the pipeview match the gold
 | `docs/` | ۷ | `PHASE_5B_REPORT.fa.md`، `RTL_ARCH.md`، `RTL_FINDINGS.md`، `DECISIONS.md`، `OPTIMIZATION_DATA.md`، `BENCHMARKS.md`، `MICROARCH_CONTRACT.md` |
 | ریشه و CI | ۴ | `Makefile`، `README.md`، `.gitignore`، `.github/workflows/test.yml` |
 
-جمع: **۱۰۷ فایل، +۵۴۷۹ / −۵۵۴ خط** نسبت به `15f300a` (Phase 5A).
+جمع: **۱۰۷ فایل، +۵۴۸۷ / −۵۵۴ خط** نسبت به `15f300a` (Phase 5A).
 
 ### پ) ابزارها و نسخه‌ها (بند ۲ خواستهٔ T7)
 
