@@ -9,6 +9,7 @@ timeout is a failure and makes this script exit nonzero.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -59,9 +60,12 @@ EXTRA_TESTS: List[Tuple[str, str, str, Sequence[str], str]] = [
     ("tb_reset_midrun.vhd", "tb_reset_midrun", "mid-run reset, 3-cycle", ("-gRESET_LEN=3",), "_len3"),
 ]
 
+# Search order for the second simulator, kept in step with the Makefile:
+# the permanent local install under $HOME/tools first, then PATH (what CI
+# uses), and only then the ephemeral /tmp copy.
 GHDL_CANDIDATES = [
-    "ghdl",
     str(Path.home() / "tools" / "ghdl" / "bin" / "ghdl"),
+    "ghdl",
     "/tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl",
 ]
 
@@ -69,11 +73,17 @@ GHDL_CANDIDATES = [
 def find_ghdl(explicit: Optional[str] = None) -> str:
     if explicit:
         return explicit
-    env = shutil.which("ghdl")
+    # The GHDL environment variable wins: the Makefile exports it so that
+    # "make GHDL=/path/to/ghdl" reaches every tool.
+    env = os.environ.get("GHDL")
     if env:
         return env
-    for c in GHDL_CANDIDATES[1:]:
-        if Path(c).is_file():
+    for c in GHDL_CANDIDATES:
+        if c == "ghdl":
+            found = shutil.which("ghdl")
+            if found:
+                return found
+        elif Path(c).is_file() and os.access(c, os.X_OK):
             return c
     return "ghdl"
 

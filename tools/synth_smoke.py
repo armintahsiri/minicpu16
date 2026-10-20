@@ -97,11 +97,13 @@ end architecture;
 
 
 def find_ghdl() -> str:
+    # The permanent local install is preferred; PATH (what CI uses) comes next
+    # and the ephemeral /tmp copy is only a fallback.  GHDL overrides all.
     env = os.environ.get("GHDL")
     if env:
         return env
-    cands = [shutil.which("ghdl"),
-             str(Path.home() / "tools" / "ghdl" / "bin" / "ghdl"),
+    cands = [str(Path.home() / "tools" / "ghdl" / "bin" / "ghdl"),
+             shutil.which("ghdl"),
              "/tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl"]
     for c in cands:
         if c and Path(c).is_file():

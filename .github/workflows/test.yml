@@ -1,27 +1,60 @@
 # MiniCPU-16 CI (Phase 5B).
 #
-# This workflow has NOT been executed on GitHub.  It is committed as the intended
-# runner definition and is explicitly unverified.
+# ##########################################################################
+# # THIS WORKFLOW HAS NEVER BEEN EXECUTED ON GITHUB ACTIONS.              #
+# # It is committed as the intended runner definition and is explicitly  #
+# # UNVERIFIED.  It is written to be plausible, but "plausible" is not   #
+# # "verified": the action versions, the apt package and the runner      #
+# # image are unpinned guesses.  Treat the first run as an experiment.   #
+# #                                                                     #
+# # Nothing in this repository claims that CI is green.  The Phase 5B    #
+# # report says the same in section 11 ("not verified"): every number in #
+# # docs/ is from a LOCAL run, on this machine, with the tool versions  #
+# # listed in section 2 of the report.                                    #
+# ##########################################################################
 #
-# What CI runs: \`make test\`, the quick suite only.  That includes the Phase 4
-# checks, the fuzz-generator diversity assertion, all leaf RTL testbenches, the
-# quick CYCLE-EXACT differential suite on NVC and GHDL (retirement trace
-# including retire cycles, final cycle count and pipeview), a 40-program
-# cycle-exact fuzz (8 of them on GHDL) including the forwarding-targeted mode,
-# and the FORWARDING=false architectural regression subset.
+# What CI runs: `make test`, the quick suite only.  That is:
+#   - the consistency check and its negative self-test;
+#   - the VHDL-2008 analysis of the package and a generated program
+#     package under BOTH simulators (NVC and GHDL);
+#   - the assembler tests, the golden-model and trace-diff tests, the
+#     benchmark program results, the generator self-validation and the
+#     benchmark assertions;
+#   - the fuzz-generator diversity assertion (>= 98% overall, >= 90% per
+#     mode, over all eight generator modes);
+#   - every leaf RTL testbench under NVC and GHDL;
+#   - the quick cycle-exact differential suite on NVC and GHDL
+#     (retirement trace INCLUDING the retire-cycle column, the final
+#     cycle count, and the per-cycle pipeview);
+#   - a 40-program cycle-exact fuzz (8 of them on GHDL), the forwarding
+#     configuration, with the coverage thresholds asserted;
+#   - the FORWARDING=false architectural regression subset.
 #
-# What stays local (not run by CI): the full 1000-program forwarding fuzz
-# (\`make rtl-fuzz\`), the general 300-program fuzz (\`make rtl-fuzz-general\`), the
-# mutation check (\`make mutation\`), and synthesis/Fmax (\`make synth-smoke\`).
+# What stays local (NOT run by CI): the full 1000-program forwarding
+# fuzz (`make rtl-fuzz`), the general 300-program fuzz
+# (`make rtl-fuzz-general`), the mutation check (`make mutation`), the
+# synthesis/Fmax run (`make synth-smoke`) and the optional gate-level
+# post-synthesis simulation (`make postsynth-sim`).  The last one is
+# local because it needs the ghdl-yosys-plugin, which is not installed by
+# this workflow.
 #
-# Not verified anywhere yet: hardware, post-synthesis simulation, timing
-# sign-off, and the package/action versions below.
+# Not verified anywhere yet: hardware, timing sign-off, and this workflow
+# itself.
 #
-# Package/action notes:
-#   - nickg/setup-nvc@v1 installs NVC; NVC 1.23.0 was used locally.
-#   - Ubuntu's "ghdl" package provides GHDL 6.x with VHDL-2008.  GHDL 6.0.0 was
-#     used locally (official LLVM macOS archive); the Ubuntu version is unpinned.
+# Package/action notes (all of this is UNVERIFIED):
+#   - `nickg/setup-nvc@v1` installs NVC.  The action's only documented
+#     input is `version`; "latest" is the documented example.  NVC 1.23.0
+#     was used locally.  The action is pinned to the major tag only.
+#   - Ubuntu's "ghdl" package provides GHDL with VHDL-2008 support.  GHDL
+#     6.0.0 was used locally (the official LLVM macOS archive); the
+#     Ubuntu version is unpinned, and GHDL 6.x is what the RTL and the
+#     testbenches were written against.
 #   - Python 3.12 is used; all tools are standard library only.
+#   - The Makefile finds GHDL as: an explicit `make GHDL=...`, then
+#     `$HOME/tools/ghdl/bin/ghdl`, then `ghdl` on PATH, then the ephemeral
+#     /tmp copy.  On the runner only the PATH entry exists, which is the
+#     intended CI path.  If no GHDL is found the build fails loudly
+#     instead of failing later with a confusing error.
 
 name: test
 

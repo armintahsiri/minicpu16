@@ -31,6 +31,11 @@
 # silently breaks.  If no GHDL is found, the check below fails loudly instead of
 # producing a confusing "ghdl: command not found" halfway through a run.
 # Override with: make GHDL=/path/to/ghdl test
+#
+# The Python tools resolve GHDL themselves, in the same order, and honour the
+# GHDL environment variable.  The Makefile exports it so that "make
+# GHDL=/path/to/ghdl test" really uses that GHDL in every tool, not only in
+# the recipes that name $(GHDL) directly.
 
 NVC       ?= nvc
 GHDL_HOME ?= $(HOME)/tools/ghdl
@@ -38,6 +43,7 @@ GHDL_TMP  := /tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl
 GHDL      ?= $(shell test -x $(GHDL_HOME)/bin/ghdl && echo $(GHDL_HOME)/bin/ghdl || \
                        (command -v ghdl 2>/dev/null) || \
                        (test -x $(GHDL_TMP) && echo $(GHDL_TMP)))
+export GHDL
 STD       := --std=08
 BUILD     := build
 NVC_DIR   := $(BUILD)/nvc
