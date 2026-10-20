@@ -382,6 +382,36 @@ an unpipelined, untuned design; it is not a hardware result.
 shared, unconstrained flow and must not be read as a comparison of the two
 microarchitectures.  No timing fix was attempted in 5B (non-goal).
 
+## F31. Post-synthesis simulation needs generic technology mapping
+
+**Attempt.** Step 10 makes an optional gate-level run of the synthesized
+design with `tools/postsynth_sim.py`: Yosys + ghdl-yosys-plugin maps the core,
+then the built-in `sim` command executes the netlist.
+
+**Finding.** Running the **iCE40 cell netlist** (after `synth_ice40`) under the
+open `cells_sim.v` model does not work: the instruction ROM is inferred as
+`SB_RAM40_4K`, whose simulation model only preloads `INIT_0` and is not given the
+per-instance `INIT_*` parameters that the synthesizer emitted, so the core reads
+a zero instruction word, which is HALT; the fetch pointer sticks at index 1.
+The synthesized netlist itself is correct — the `INIT_0` parameters carry the
+program (verified by reading them back and by a direct `SB_RAM40_4K` model
+probe, which returned the expected word at address 1).  This is a limitation of
+the open simulation model / Yosys `sim` parameter handling, not of the RTL.
+
+**Choice.** `postsynth_sim.py` therefore maps the design with generic
+technology mapping (`proc; opt; memory; opt; techmap; opt`), which keeps the
+memories as initialized flip-flop logic, and runs the gate-level logic through
+Yosys `sim`.  It asserts the architectural result (GPIO_OUT and HALT) and
+reports, but does not assert, `pc_out` — that is the internal fetch pointer,
+whose frozen value after HALT is unspecified (F3).
+
+**Non-vacuity.** With mutation 16 applied to a scratch copy of the RTL (disable
+forwarding to operand B), the gate-level GPIO_OUT reads 0x0000 instead of the
+golden 0x0026 and the tool fails; on the committed RTL it passes.  The check
+therefore detects a real forwarding bug in the post-synthesis logic.
+
+**Status.** Optional Step 10, run manually; not part of `make test`.
+
 ---
 
 ## Contract/model changes in Phase 5B

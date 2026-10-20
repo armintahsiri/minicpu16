@@ -13,6 +13,9 @@
 #                    the general six-mode fuzz (300 NVC + 100 GHDL), cycles checked
 #   make mutation    the mutation check (directed + fuzz-only, NVC + GHDL)
 #   make synth-smoke Yosys/GHDL inference check and nextpnr estimates (time-boxed)
+#   make postsynth-sim
+#                    optional Step 10: gate-level simulation of the synthesized
+#                    forwarding logic (Yosys generic mapping + built-in sim)
 #   make bench       print the benchmark table and regenerate docs/BENCHMARKS.md
 #   make clean       remove build/, work/ and __pycache__
 #
@@ -29,7 +32,7 @@ NVC_DIR   := $(BUILD)/nvc
 GHDL_DIR  := $(BUILD)/ghdl
 PY        := python3
 
-.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         diversity rtl-fuzz rtl-fuzz-quick rtl-fuzz-general rtl-test mutation         synth-smoke fwd-regression
+.PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         diversity rtl-fuzz rtl-fuzz-quick rtl-fuzz-general rtl-test mutation         synth-smoke postsynth-sim fwd-regression
 
 all: test
 
@@ -128,6 +131,10 @@ mutation:
 synth-smoke:
 	@echo "=== synthesis inference smoke test (Yosys + ghdl-yosys-plugin) ==="
 	@$(PY) tools/synth_smoke.py --build $(BUILD)/synth
+
+postsynth-sim:
+	@echo "=== post-synthesis gate-level simulation (step 10, optional) ==="
+	@$(PY) tools/postsynth_sim.py --program tests/directed/l_postsynth.asm 	     --forwarding true --cycles 60 --build $(BUILD)/postsynth
 
 clean:
 	@rm -rf $(BUILD) work

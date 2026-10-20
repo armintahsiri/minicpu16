@@ -866,3 +866,14 @@ distance 1 and stalls one cycle; `r4 = 0x55`, 8 retired, 13 cycles.
    but registered at the end of MEM.
 
 The Step 8 nextpnr reports are compared against these predictions.
+
+## 10. Post-synthesis simulation (optional)
+
+`tools/postsynth_sim.py` (Make target `postsynth-sim`) maps the forwarding
+core with Yosys + ghdl-yosys-plugin and runs the built-in `sim` command,
+asserting the gate-level `gpio_out` and HALT against the golden model for
+`tests/directed/l_postsynth.asm`.  It uses generic technology mapping rather
+than the iCE40 cell netlist because the open `SB_RAM40_4K` model does not load
+the synthesized INIT parameters (finding F31).  The check is non-vacuous: the
+operand-B forwarding mutation makes it fail.  It is optional and not part of
+`make test`.

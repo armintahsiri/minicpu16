@@ -155,6 +155,7 @@ Individual checks:
     make fwd-regression  # stall-only architectural regression (FORWARDING=false)
     make mutation        # 30 injected RTL bugs must be caught
     make synth-smoke     # Yosys/GHDL block-RAM inference and Fmax estimate
+    make postsynth-sim   # optional: gate-level sim of the synthesized logic
 
 Run one RTL program differentially:
 
