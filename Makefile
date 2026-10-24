@@ -48,7 +48,7 @@ STD       := --std=08
 BUILD     := build
 NVC_DIR   := $(BUILD)/nvc
 GHDL_DIR  := $(BUILD)/ghdl
-PY        := python3
+PY        := python3 -u
 
 .PHONY: all test consistency vhdl-check asmtest simtest programstest gentest         tracetest bench bench-check clean rtl-leaf rtl-suite rtl-suite-quick         diversity rtl-fuzz rtl-fuzz-quick rtl-fuzz-general rtl-test mutation         synth-smoke postsynth-sim fwd-regression
 

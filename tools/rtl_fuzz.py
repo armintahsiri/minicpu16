@@ -15,11 +15,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 import hashlib
 import json
 import re
 import sys
 from pathlib import Path
+from functools import partial
 from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,8 @@ import isa_sim  # noqa: E402
 import random_programs  # noqa: E402
 import rtl_run  # noqa: E402
 import trace_diff  # noqa: E402
+
+print = partial(print, flush=True)
 
 MODES = ["hazards", "straight", "loop", "calls", "coverage", "mmio_writes", "fwd",
          "store_load"]
@@ -387,6 +391,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     cov_random = {k: 0 for k in COV_KEYS}
     failed = 0
     for idx, (name, path, uart_cycles) in enumerate(cases):
+        started = time.monotonic()
+        print("START %s %s" % (name, ns.sim))
         res = rtl_run.run_case(
             [path], name=name, sim=ns.sim, runtime=True,
             workdir=workdir, max_cycles=ns.max_cycles,
@@ -396,6 +402,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ignore_cycles=not ns.check_cycles)
         results.append(res)
         if res.get("error"):
+            print("FAIL %s %s %.2fs" % (name, ns.sim, time.monotonic() - started))
             print("FAIL %-34s %-4s %s" % (name, ns.sim, res["error"]))
             failed += 1
             if ns.stop_on_fail:
@@ -412,6 +419,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cov_random[k] += v
         if not res.get("ok"):
             failed += 1
+            print("FAIL %s %s %.2fs" % (name, ns.sim, time.monotonic() - started))
             rtl_run.print_result(res)
             bad = workdir / ("fail_" + name)
             bad.mkdir(parents=True, exist_ok=True)
@@ -424,6 +432,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if ns.stop_on_fail:
                 break
         else:
+            print("PASS %s %s %.2fs" % (name, ns.sim, time.monotonic() - started))
             print("PASS %-34s %-4s cycles=%-6s stalls=%-5s" %
                   (name, ns.sim, res.get("rtl_cycles"), res.get("rtl_stalls")))
 
@@ -460,6 +469,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("GHDL subset: %d programs" % len(subset))
         gfail = 0
         for name, path, uart_cycles in subset:
+            started = time.monotonic()
+            print("START %s ghdl" % (name + "_ghdl"))
             res = rtl_run.run_case(
                 [path], name=name + "_ghdl", sim="ghdl", runtime=True,
                 workdir=workdir, max_cycles=ns.max_cycles,
@@ -470,6 +481,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not res.get("ok"):
                 gfail += 1
                 rtl_run.print_result(res)
+            status = "PASS" if res.get("ok") else "FAIL"
+            print("%s %s ghdl %.2fs" % (status, name + "_ghdl",
+                                        time.monotonic() - started))
         print("GHDL subset: %d cases, %d failed" % (len(subset), gfail))
         if gfail:
             return 1

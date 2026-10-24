@@ -249,9 +249,18 @@ def compare_expected(exp: Dict[str, object], got: Dict[str, object],
     return errs
 
 
-def _run(cmd: List[str], cwd: Path, timeout: int = 180) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, text=True, timeout=timeout)
+def _run(cmd: List[str], cwd: Path, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    timeout = timeout if timeout is not None else int(os.environ.get("RTL_RUN_TIMEOUT", "180"))
+    try:
+        return subprocess.run(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        output = e.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        tail = "\n".join(output.splitlines()[-40:]) or "(no output captured)"
+        raise TimeoutError("TIMEOUT after %ss: %s\nlast 40 output lines:\n%s" %
+                           (timeout, " ".join(cmd), tail)) from e
 
 
 def ensure_built(rtl_dir: Path, sim: str, work: Path, ghdl: str,

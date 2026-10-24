@@ -9,6 +9,7 @@ timeout is a failure and makes this script exit nonzero.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 RTL = ROOT / "rtl"
 TB = RTL / "tb"
+
+print = partial(print, flush=True)
 
 RTL_FILES = [
     "minicpu16_pkg.vhd",
@@ -147,15 +150,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         if ns.filter and ns.filter not in ent:
             continue
         for sim in sims:
+            started = time.monotonic()
+            print("START %s %s" % (ent, sim))
             try:
                 res = run_one(sim, tf, ent, ghdl, workroot, ns.rebuild, Path(ns.rtl_dir))
             except subprocess.TimeoutExpired:
                 res = {"sim": sim, "entity": ent, "ok": False, "checks": 0,
-                       "elapsed_s": 0, "output": "TIMEOUT", "returncode": -1}
+                       "elapsed_s": time.monotonic() - started,
+                       "output": "TIMEOUT", "returncode": -1}
             results.append(res)
             status = "PASS" if res["ok"] else "FAIL"
+            elapsed = time.monotonic() - started
+            print("%s %s %s %.2fs" % (status, ent, sim, elapsed))
             print("%s %-18s %-4s checks=%-9d %6.2fs" %
-                  (status, ent, sim, res["checks"], res["elapsed_s"]))
+                  (status, ent, sim, res["checks"], elapsed))
             if not res["ok"]:
                 failed += 1
                 tail = "\n".join(str(res["output"]).splitlines()[-12:])
@@ -164,16 +172,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         if ns.filter and ns.filter not in ent:
             continue
         for sim in sims:
+            started = time.monotonic()
+            print("START %s %s" % (ent + tag, sim))
             try:
                 res = run_one(sim, tf, ent, ghdl, workroot, ns.rebuild,
                               Path(ns.rtl_dir), gens, tag)
             except subprocess.TimeoutExpired:
                 res = {"sim": sim, "entity": ent, "ok": False, "checks": 0,
-                       "elapsed_s": 0, "output": "TIMEOUT", "returncode": -1}
+                       "elapsed_s": time.monotonic() - started,
+                       "output": "TIMEOUT", "returncode": -1}
             results.append(res)
             status = "PASS" if res["ok"] else "FAIL"
+            elapsed = time.monotonic() - started
+            print("%s %s %s %.2fs" % (status, ent + tag, sim, elapsed))
             print("%s %-18s %-4s checks=%-9d %6.2fs  %s" %
-                  (status, ent + tag, sim, res["checks"], res["elapsed_s"], desc))
+                  (status, ent + tag, sim, res["checks"], elapsed, desc))
             if not res["ok"]:
                 failed += 1
                 tail = "\n".join(str(res["output"]).splitlines()[-14:])

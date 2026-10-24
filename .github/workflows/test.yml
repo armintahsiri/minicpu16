@@ -85,5 +85,15 @@ jobs:
           nvc --version
           ghdl --version
 
+      - name: Runner diagnostics
+        if: always()
+        run: |
+          ghdl --version || true
+          nvc --version || true
+          python3 --version || true
+          make --version || true
+          nproc || true
+          free -m || true
+
       - name: Quick cycle-exact suite (Phase 4 + Phase 5B)
         run: make test

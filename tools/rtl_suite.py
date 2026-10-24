@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,6 +28,8 @@ if str(TOOLS) not in sys.path:
 
 import rtl_run  # noqa: E402
 import trace_diff  # noqa: E402
+
+print = partial(print, flush=True)
 
 BENCHMARKS = [
     "fibonacci", "factorial_rec", "bubble_sort", "crc16", "memory_ops",
@@ -105,12 +109,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     sims = ["nvc", "ghdl"] if ns.sim == "both" else [ns.sim]
     results: List[Dict[str, object]] = []
 
+    def timed_run(name: str, sim: str, fn) -> Dict[str, object]:
+        started = time.monotonic()
+        print("START %s %s" % (name, sim), flush=True)
+        try:
+            res = fn()
+        except Exception as exc:  # report a per-case failure and continue
+            res = {"name": name, "sim": sim, "ok": False, "error": str(exc)}
+        elapsed = time.monotonic() - started
+        status = "PASS" if res.get("ok") else "FAIL"
+        print("%s %s %s %.2fs" % (status, name, sim, elapsed), flush=True)
+        return res
+
     for sim in sims:
         print("=== reference traces (%s) ===" % sim)
         for asm in sorted((ROOT / "tests" / "reference_traces").glob("*.asm")):
             if ns.exclude_timing_dependent and asm.stem == "05_mmio":
                 continue
-            res = run_reference(asm.stem, sim, ns, ghdl)
+            res = timed_run("ref_" + asm.stem, sim,
+                            lambda: run_reference(asm.stem, sim, ns, ghdl))
             rtl_run.print_result(res)
             results.append(res)
 
@@ -119,12 +136,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         for name in bench:
             if ns.exclude_timing_dependent and name == "hello":
                 continue
-            res = run_bench(name, sim, ns, ghdl)
+            res = timed_run("bench_" + name, sim,
+                            lambda: run_bench(name, sim, ns, ghdl))
             rtl_run.print_result(res)
             results.append(res)
         if ns.uart_cycle_tests and not ns.quick:
             for n in (1, 104):
-                res = run_bench("hello", sim, ns, ghdl, uart_cycles=n)
+                res = timed_run("bench_hello_uart%d" % n, sim,
+                                lambda: run_bench("hello", sim, ns, ghdl,
+                                                  uart_cycles=n))
                 res["name"] = "bench_hello_uart%d" % n
                 rtl_run.print_result(res)
                 results.append(res)
@@ -144,13 +164,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "g_pc_wrap", "f_timer_cycle", "f_uart_busy_edge",
             }:
                 continue
-            res = run_directed(asm, sim, ns, ghdl)
+            res = timed_run("dir_" + asm.stem, sim,
+                            lambda: run_directed(asm, sim, ns, ghdl))
             rtl_run.print_result(res)
             results.append(res)
 
     failed = [r for r in results if not r.get("ok")]
     print()
-    print("differential suite: %d cases, %d failed" % (len(results), len(failed)))
+    print("differential suite: %d cases, %d failed" % (len(results), len(failed)), flush=True)
     for r in failed:
         print("  FAILED %s (%s)" % (r.get("name"), r.get("sim")))
     return 0 if not failed else 1
