@@ -574,6 +574,38 @@ not sign-off numbers.
 
 ---
 
+## F34. CI was terminated during the quick RTL suite; cause not determined
+
+**Observation.** The reported GitHub Actions `full` job passed all 26 leaf RTL
+testbench runs, then `make rtl-suite-quick` was terminated with exit code 143.
+The Makefile maps this target to `tools/rtl_suite.py --sim both --quick`.
+The previous log showed only the Make target header, with no case-level
+progress or simulator/resource versions. The workflow timeout is 45 minutes;
+the Python runner already had a 180-second subprocess timeout, but its timeout
+output was collapsed into a generic per-case error and buffered suite output
+could hide the last completed case.
+
+**Cause.** Not determined. The available log does not distinguish slow
+simulation, an external termination, or an apt-GHDL compatibility issue.
+Local GHDL is 6.0.0, NVC is 1.23.0, and Docker reproduction was unavailable
+because the local Docker daemon was not running. The local host is macOS, so
+the Ubuntu apt-GHDL invocation was not reproduced here.
+
+**Diagnostic change.** Python Makefile recipes are unbuffered. The suite,
+fuzz, and leaf runners log `START` and `PASS`/`FAIL` with elapsed seconds for
+each run. `RTL_RUN_TIMEOUT` sets the RTL subprocess timeout (default 180
+seconds); expiry now reports the simulator command and last 40 output lines.
+The workflow prints GHDL, NVC, Python, Make, CPU-count, and memory versions/
+resources before `make test`, even if an earlier step failed.
+
+**Not verified.** The updated workflow has not run on GitHub Actions. No
+simulator version change, test-scope reduction, or job split is justified by
+the available evidence. The next Actions log should identify the last `START`
+case and its timeout/failure details, or show that termination occurred
+outside a case.
+
+---
+
 ## Contract/model changes in Phase 5B
 
 Phase 5B amended the contract and timing layer in exactly the Step-2 peripheral
