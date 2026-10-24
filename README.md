@@ -15,8 +15,11 @@ The default configuration is `FORWARDING=true`; the stall-only
 
 Cycle exactness is asserted by 1000 forwarding fuzz programs on NVC plus 150 on
 GHDL, the full differential suite (136 case-runs), and every benchmark
-satisfying `cycles = N + 4 + S + 2R` exactly.  There is still **no hardware
-test** and CI has **not been executed on GitHub**.
+satisfying `cycles = N + 4 + S + 2R` exactly. There is still **no hardware
+test**. GitHub Actions has run, but the reported run failed after the 26 leaf
+testbenches, when `make rtl-suite-quick` was terminated with exit 143. The
+cause is not determined; this commit adds per-case timings and runner version
+diagnostics for the next run (F34).
 
 ## Goals
 
@@ -275,9 +278,11 @@ LUT4.
 * **No hardware test.**  Nothing has run on an FPGA.  The synthesis smoke test is
   an inference/count estimate, not a placed-and-routed hardware result; Fmax is an
   estimate with a fixed seed.
-* CI is written and updated for Phase 5A, but it has **not been executed on
-  GitHub**.  The workflow installs NVC and the distro GHDL; package versions and
-  action behaviour are unverified.  Mutation and full fuzz stay local.
+* CI has executed and failed at `make rtl-suite-quick` after all leaf RTL
+  testbenches passed. The cause is unknown because the run did not log suite
+  case progress or runner versions. Diagnostics are now in the workflow; the
+  updated workflow remains unverified until another GitHub Actions run.
+  Mutation and full fuzz stay local.
 * The peripheral timing (TIMER, UART busy window, GPIO_IN synchroniser) was
   made normative in contract section 7 during Phase 5B and the RTL was corrected
   (finding F25); those programs are now compared cycle-exactly too.

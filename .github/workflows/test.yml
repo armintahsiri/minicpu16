@@ -1,16 +1,13 @@
 # MiniCPU-16 CI (Phase 5B).
 #
 # ##########################################################################
-# # THIS WORKFLOW HAS NEVER BEEN EXECUTED ON GITHUB ACTIONS.              #
-# # It is committed as the intended runner definition and is explicitly  #
-# # UNVERIFIED.  It is written to be plausible, but "plausible" is not   #
-# # "verified": the action versions, the apt package and the runner      #
-# # image are unpinned guesses.  Treat the first run as an experiment.   #
+# # CI HAS EXECUTED AND FAILED. The reported run passed all 26 leaf       #
+# # testbenches, then `make rtl-suite-quick` was terminated (exit 143).   #
+# # The cause is UNKNOWN: that run had no per-case progress or runner    #
+# # version/resource diagnostics. This workflow adds those diagnostics. #
 # #                                                                     #
-# # Nothing in this repository claims that CI is green.  The Phase 5B    #
-# # report says the same in section 13 ("not verified"): every number in #
-# # docs/ is from a LOCAL run, on this machine, with the tool versions  #
-# # listed in section 13 of the report.                                   #
+# # CI is not claimed green. No GitHub Actions rerun has verified these  #
+# # diagnostic changes; local evidence is recorded in docs/RTL_FINDINGS. #
 # ##########################################################################
 #
 # What CI runs: `make test`, the quick suite only.  That is:
@@ -38,8 +35,7 @@
 # local because it needs the ghdl-yosys-plugin, which is not installed by
 # this workflow.
 #
-# Not verified anywhere yet: hardware, timing sign-off, and this workflow
-# itself.
+# Not verified: hardware, timing sign-off, and this updated workflow.
 #
 # Package/action notes (all of this is UNVERIFIED):
 #   - `nickg/setup-nvc@v1` installs NVC.  The action's only documented
