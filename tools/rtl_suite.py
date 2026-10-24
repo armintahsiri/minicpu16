@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from functools import partial
@@ -113,7 +114,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         started = time.monotonic()
         print("START %s %s" % (name, sim), flush=True)
         try:
-            res = fn()
+            with rtl_run.timeout_scope(int(os.environ.get("RTL_RUN_TIMEOUT", "180"))):
+                res = fn()
         except Exception as exc:  # report a per-case failure and continue
             res = {"name": name, "sim": sim, "ok": False, "error": str(exc)}
         elapsed = time.monotonic() - started

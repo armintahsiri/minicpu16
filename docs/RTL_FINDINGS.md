@@ -593,8 +593,9 @@ the Ubuntu apt-GHDL invocation was not reproduced here.
 
 **Diagnostic change.** Python Makefile recipes are unbuffered. The suite,
 fuzz, and leaf runners log `START` and `PASS`/`FAIL` with elapsed seconds for
-each run. `RTL_RUN_TIMEOUT` sets the RTL subprocess timeout (default 180
-seconds); expiry now reports the simulator command and last 40 output lines.
+each run. `RTL_RUN_TIMEOUT` sets the per-case wall-clock deadline (default 180
+seconds), shared across that case's simulator subprocesses; expiry reports the
+simulator command and last 40 output lines.
 The workflow prints GHDL, NVC, Python, Make, CPU-count, and memory versions/
 resources before `make test`, even if an earlier step failed.
 

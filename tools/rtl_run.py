@@ -17,6 +17,7 @@ Exit status: 0 match, 1 mismatch/error, 2 tool/configuration error.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -67,6 +68,20 @@ GHDL_CANDIDATES = [
     "ghdl",
     "/tmp/ghdl-llvm-6.0.0-macos15-aarch64/bin/ghdl",
 ]
+
+_RUN_DEADLINE: Optional[float] = None
+
+
+@contextmanager
+def timeout_scope(seconds: int):
+    """Apply one wall-clock deadline across all simulator commands in a case."""
+    global _RUN_DEADLINE
+    previous = _RUN_DEADLINE
+    _RUN_DEADLINE = time.monotonic() + seconds
+    try:
+        yield
+    finally:
+        _RUN_DEADLINE = previous
 
 
 def find_ghdl(explicit: Optional[str] = None) -> str:
@@ -251,6 +266,12 @@ def compare_expected(exp: Dict[str, object], got: Dict[str, object],
 
 def _run(cmd: List[str], cwd: Path, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
     timeout = timeout if timeout is not None else int(os.environ.get("RTL_RUN_TIMEOUT", "180"))
+    if _RUN_DEADLINE is not None:
+        remaining = _RUN_DEADLINE - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("TIMEOUT after case deadline: %s\nlast 40 output lines:\n(no output captured)" %
+                               " ".join(cmd))
+        timeout = min(timeout, remaining)
     try:
         return subprocess.run(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True, timeout=timeout)
@@ -259,7 +280,7 @@ def _run(cmd: List[str], cwd: Path, timeout: Optional[int] = None) -> subprocess
         if isinstance(output, bytes):
             output = output.decode(errors="replace")
         tail = "\n".join(output.splitlines()[-40:]) or "(no output captured)"
-        raise TimeoutError("TIMEOUT after %ss: %s\nlast 40 output lines:\n%s" %
+        raise TimeoutError("TIMEOUT after %.2fs: %s\nlast 40 output lines:\n%s" %
                            (timeout, " ".join(cmd), tail)) from e
 
 
